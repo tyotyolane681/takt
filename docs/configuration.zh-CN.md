@@ -230,6 +230,7 @@ assistant:
 | `pipeline` | object | - | Pipeline 模板设置 |
 | `bookmarks_file` | string | - | bookmarks 文件路径 |
 | `auto_fetch` | boolean | `false` | 创建 clone 前 fetch remote |
+| `jev` | object | 禁用 | 使用 Jev（TypeSafe）进行状态判定的 opt-in 设置。参见 [使用 Jev 进行状态判定](#使用-jev-进行状态判定) |
 | `base_branch` | string | - | 创建 clone 的基分支，默认 remote 默认分支 |
 | `workflow_categories_file` | string | - | 分类文件路径，默认 overlay 使用 `workflow-categories.yaml` |
 | `vcs_provider` | `"github"` \| `"gitlab"` | 自动检测 | VCS provider |
@@ -243,6 +244,23 @@ assistant:
 | `workflow_overrides` | object | - | workflow 级 `quality_gates` 与 `quality_gates_edit_only` 覆盖 |
 | `sync_conflict_resolver` | object | `{ auto_approve_tools: false }` | sync conflict resolver 策略 |
 | `observability` | object | disabled | opt-in OpenTelemetry 基础设施 |
+
+## 使用 Jev 进行状态判定
+
+设置 `jev` 后，Phase 3 的状态判定（从规则候选中选择一个）将由 [Jev](https://docs.typesafe.ai)（TypeSafe）完成，而不是调用 provider。每次判定无需启动 provider 会话，从而减少 token 消耗和等待时间。
+
+```yaml
+jev:
+  mode: enforce        # off（默认） / shadow / enforce
+  threshold: 0.8       # enforce 模式下采用 Jev 判定的最低置信度（默认: 0.8）
+  model: jev-1.13.0    # 固定为调整阈值时使用的模型（默认: jev-1.13.0）
+```
+
+- `shadow`：仍由 provider 判定，并在会话日志中以 `method: jev` 的判定阶段记录 Jev 是否一致。
+- `enforce`：Jev 的置信度不低于 `threshold` 时采用 Jev 的判定。若 Jev 出错、返回 `unsure`、置信度不足，或与报告中明确的 `APPROVE` / `REJECT` 结论冲突，则回退到 provider 判定，并在判定阶段记录 `fallbackReason`。
+- API 密钥从环境变量 `TYPESAFE_API_KEY` 读取，不写入配置文件。
+- 仅发送判定指令（报告和判定标准）。发送前会对邮箱、电话号码、类似 token 的字符串以及机构名、人名等进行脱敏。
+- 可通过 `TAKT_JEV_MODE` / `TAKT_JEV_THRESHOLD` / `TAKT_JEV_MODEL` 覆盖。
 
 ## Caccia Review Loop
 

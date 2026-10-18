@@ -1,5 +1,6 @@
 export type { StructuredCaller } from './structured-caller/contracts.js';
 export { ProviderNeutralStructuredCaller } from './structured-caller/provider-neutral-structured-caller.js';
+export { JevStructuredCaller, createStructuredCaller } from './structured-caller/jev-structured-caller.js';
 export {
   executeStructuredTextAgent,
   StructuredAgentContractError,

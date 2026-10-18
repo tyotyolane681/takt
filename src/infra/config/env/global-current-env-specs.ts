@@ -75,5 +75,9 @@ export const GLOBAL_ENV_SPECS: readonly EnvSpec[] = [
   { path: 'notification_sound_events.run_complete', type: 'boolean' },
   { path: 'notification_sound_events.run_abort', type: 'boolean' },
   { path: 'auto_fetch', type: 'boolean' },
+  { path: 'jev', type: 'json' },
+  { path: 'jev.mode', type: 'string' },
+  { path: 'jev.threshold', type: 'number' },
+  { path: 'jev.model', type: 'string' },
   { path: 'base_branch', type: 'string' },
 ];

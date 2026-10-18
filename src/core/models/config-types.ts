@@ -331,6 +331,15 @@ export interface WorkflowMcpServersConfig {
 
 
 /** Notification sound toggles per event timing */
+export interface JevConfig {
+  /** off (default) / shadow: record Jev's choice only / enforce: adopt Jev's choice when confident enough */
+  mode?: 'off' | 'shadow' | 'enforce';
+  /** Minimum Jev confidence to adopt its choice in enforce mode (default: 0.8) */
+  threshold?: number;
+  /** Jev model ID; pin a version when the threshold is tuned (default: jev-1.13.0) */
+  model?: string;
+}
+
 export interface NotificationSoundEventsConfig {
   /** Warning when iteration limit is reached */
   iterationLimit?: boolean;
@@ -519,4 +528,7 @@ export interface GlobalConfig extends Omit<ProjectConfig, 'submodules' | 'withSu
   /** @globalOnly */
   /** Opt-in: fetch remote before cloning to keep clones up-to-date (default: false) */
   autoFetch: boolean;
+  /** @globalOnly */
+  /** Opt-in: answer status judgments with Jev (TypeSafe) instead of a provider call */
+  jev?: JevConfig;
 }

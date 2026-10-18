@@ -251,6 +251,11 @@ const GlobalOnlyConfigSchema = z.object({
     run_abort: z.boolean().optional(),
   }).strict().optional(),
   auto_fetch: z.boolean().optional().default(false),
+  jev: z.object({
+    mode: z.enum(['off', 'shadow', 'enforce']).optional(),
+    threshold: z.number().gt(0).max(1).optional(),
+    model: z.string().optional(),
+  }).strict().optional(),
 });
 
 /** Global config schema = ProjectConfig + global-only fields. */

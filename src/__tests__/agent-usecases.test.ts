@@ -116,7 +116,7 @@ const requestDecompositionRawResponse = (
 ) => requestDecompositionRawResponseImpl(args[0], args[1], withResolvedMockProvider(args[2]));
 type JudgeStageLog = {
   stage: 1 | 2 | 3;
-  method: 'structured_output' | 'phase3_tag' | 'ai_judge';
+  method: 'structured_output' | 'phase3_tag' | 'ai_judge' | 'jev';
   status: 'done' | 'error' | 'skipped';
   instruction: string;
   response: string;

@@ -214,6 +214,15 @@ export function serializeGlobalConfig(config: GlobalConfig): Record<string, unkn
   if (config.autoFetch) {
     raw.auto_fetch = config.autoFetch;
   }
+  if (config.jev) {
+    const jevRaw: Record<string, unknown> = {};
+    if (config.jev.mode !== undefined) jevRaw.mode = config.jev.mode;
+    if (config.jev.threshold !== undefined) jevRaw.threshold = config.jev.threshold;
+    if (config.jev.model !== undefined) jevRaw.model = config.jev.model;
+    if (Object.keys(jevRaw).length > 0) {
+      raw.jev = jevRaw;
+    }
+  }
   if (config.baseBranch) {
     raw.base_branch = config.baseBranch;
   }

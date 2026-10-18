@@ -141,6 +141,7 @@ vi.mock('../features/tasks/execute/analyticsEmitter.js', () => ({
 
 vi.mock('../agents/structured-caller.js', () => ({
   ProviderNeutralStructuredCaller: vi.fn().mockImplementation(() => ({})),
+  createStructuredCaller: vi.fn().mockImplementation(() => ({})),
 }));
 
 vi.mock('../features/tasks/execute/outputFns.js', () => ({

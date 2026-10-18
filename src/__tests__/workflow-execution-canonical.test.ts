@@ -75,6 +75,7 @@ vi.mock('../features/tasks/execute/workflowExecutionBundle.js', () => {
 
 vi.mock('../agents/structured-caller.js', () => ({
   ProviderNeutralStructuredCaller: class {},
+  createStructuredCaller: () => ({}),
 }));
 
 vi.mock('../infra/observability/otelFoundation.js', () => ({

@@ -237,6 +237,7 @@ dynamic parallel と `dynamic_facets` の selector は読み取り専用で、`R
 | `pipeline` | object | - | pipeline テンプレート設定 |
 | `bookmarks_file` | string | - | ブックマークファイルのパス |
 | `auto_fetch` | boolean | `false` | クローン作成前にリモートを fetch してクローンを最新に保つ |
+| `jev` | object | 無効 | ステータス判定を Jev（TypeSafe）で行う opt-in 設定。[Jev によるステータス判定](#jev-によるステータス判定) 参照 |
 | `base_branch` | string | - | クローン作成のベースブランチ（デフォルトはリモートのデフォルトブランチ） |
 | `workflow_categories_file` | string | - | カテゴリファイルのパス（[Workflow カテゴリ](#workflow-カテゴリ) 参照。デフォルトのユーザー上書きは `workflow-categories.yaml`） |
 | `vcs_provider` | `"github"` \| `"gitlab"` | 自動検出 | VCS プロバイダー（git リモート URL から自動検出） |
@@ -250,6 +251,23 @@ dynamic parallel と `dynamic_facets` の selector は読み取り専用で、`R
 | `workflow_overrides` | object | - | workflow レベルの上書き。トップレベル / step 単位 / persona 単位の `quality_gates`（AI ディレクティブまたは `type: command` ゲート）と `quality_gates_edit_only` |
 | `sync_conflict_resolver` | object | `{ auto_approve_tools: false }` | sync conflict resolver ポリシー |
 | `observability` | object | 無効 | OpenTelemetry foundation の opt-in 設定。`enabled` で SDK を初期化し、`monitor` は workflow metric を `.takt/runs/<run>/monitor.json` に出力し、`session_log_exporter` は span 由来の shadow session log を出力します。`usage_events_phase` は phase 粒度の usage events を `.takt/runs/<run>/logs/<session>-usage-events.phase.jsonl` に出力します。`enabled: true` と `OTEL_EXPORTER_OTLP_ENDPOINT` が揃うと、TAKT は標準の `OTEL_EXPORTER_OTLP_*` 環境変数で span と metric も OTLP 送信します。TAKT 独自の OTLP config キーはありません。 |
+
+## Jev によるステータス判定
+
+`jev` を設定すると、Phase 3 のステータス判定（ルール候補から1つを選ぶ処理）を、provider の呼び出しの代わりに [Jev](https://docs.typesafe.ai)（TypeSafe）で行います。判定のたびに provider のセッションを起動しなくて済むため、トークン消費と待ち時間を減らせます。
+
+```yaml
+jev:
+  mode: enforce        # off（デフォルト） / shadow / enforce
+  threshold: 0.8       # enforce で Jev の判定を採用する最小信頼度（デフォルト: 0.8）
+  model: jev-1.13.0    # しきい値を調整したモデルに固定する（デフォルト: jev-1.13.0）
+```
+
+- `shadow`: 判定は従来どおり provider が行い、Jev の判定と一致したかを判定ステージ（`method: jev`）としてセッションログに記録します。
+- `enforce`: Jev の信頼度が `threshold` 以上なら Jev の判定を採用します。Jev のエラー、`unsure`、信頼度不足、レポートに明記された `APPROVE` / `REJECT` との食い違いのいずれかに当たる場合は、従来の provider 判定に戻ります。判定ステージの記録に、戻った理由（`fallbackReason`）が残ります。
+- API キーは環境変数 `TYPESAFE_API_KEY` から読み込みます。設定ファイルには書きません。
+- 送信するのは判定の指示文（レポートと判定基準）だけです。送信前に、メールアドレス・電話番号・トークンらしき文字列・医療機関名や人名らしき表記を伏せ字にします。
+- 環境変数 `TAKT_JEV_MODE` / `TAKT_JEV_THRESHOLD` / `TAKT_JEV_MODEL` で上書きできます。
 
 ## Caccia レビューループ
 

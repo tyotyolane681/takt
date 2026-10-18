@@ -66,7 +66,10 @@ vi.mock('../core/logging/usageEventLogger.js', () => ({
 vi.mock('../features/analytics/index.js', () => ({ initAnalyticsWriter: vi.fn() }));
 vi.mock('../features/tasks/execute/sessionLogger.js', () => ({ SessionLogger: class {} }));
 vi.mock('../features/tasks/execute/analyticsEmitter.js', () => ({ AnalyticsEmitter: class {} }));
-vi.mock('../agents/structured-caller.js', () => ({ ProviderNeutralStructuredCaller: class {} }));
+vi.mock('../agents/structured-caller.js', () => ({
+  ProviderNeutralStructuredCaller: class {},
+  createStructuredCaller: () => ({}),
+}));
 
 import { createWorkflowExecutionBootstrap } from '../features/tasks/execute/workflowExecutionBootstrap.js';
 import { ResumeReportSnapshotSourceError } from '../core/workflow/run/resume-report-snapshot.js';
