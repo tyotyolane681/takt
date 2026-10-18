@@ -21,6 +21,22 @@
   <a href="./README.zh-CN.md">简体中文</a>
 </p>
 
+> [!NOTE]
+> **この fork について** — これは [nrslib/takt](https://github.com/nrslib/takt) の非公式 fork で、[@tyotyolane681](https://github.com/tyotyolane681) が管理しています。元のプロジェクトとは関係がなく、公認も受けていません。
+>
+> **元の takt との違い:** opt-in の `jev` 設定を追加しました。有効にすると、Phase 3 のステータス判定を、判定のたびに provider のセッションを起動する代わりに [Jev](https://docs.typesafe.ai)（TypeSafe）で行います。既定では無効なので、有効にしない限り元の takt と同じように動きます。詳しくは [Jev によるステータス判定](./configuration.ja.md#jev-によるステータス判定) を参照してください。
+>
+> 試験的な実行（1回のワークフロー実行で判定 8回）では、判定のための provider 呼び出しが 8回から 1回に、判定で消費するトークンが約 83% 減り、判定にかかる時間の合計が 39秒から 4秒になりました。効果はワークフローやレポートの内容によって変わります。
+>
+> **この fork のインストール**（npm の `takt` パッケージは元の takt のリリースで、この fork ではありません。Node.js 22.22 以上が必要です）:
+>
+> ```bash
+> git clone https://github.com/tyotyolane681/takt.git && cd takt
+> npm ci && npm run build && npm install -g .
+> ```
+>
+> この fork に固有の問題は、元の takt ではなく [こちら](https://github.com/tyotyolane681/takt/issues) に報告してください。以下は元の takt のドキュメントです。
+
 <p align="center">
   <a href="https://nrslib.github.io/takt/#tutorial">
     <img src="./assets/tutorial-preview.ja.gif" alt="タスクの説明、キューへの追加、複数の AI エージェントによる実行を示す TAKT チュートリアル" width="720">

@@ -21,6 +21,22 @@
   <a href="./docs/README.zh-CN.md">简体中文</a>
 </p>
 
+> [!NOTE]
+> **About this fork** — This is an unofficial fork of [nrslib/takt](https://github.com/nrslib/takt), maintained by [@tyotyolane681](https://github.com/tyotyolane681). It is not affiliated with or endorsed by the upstream project.
+>
+> **What is different:** an opt-in `jev` setting answers Phase 3 status judgment with [Jev](https://docs.typesafe.ai) (TypeSafe) instead of starting a provider session for every judgment. It is off by default, so this fork behaves like upstream unless you enable it. See [Status judgment with Jev](./docs/configuration.md#status-judgment-with-jev).
+>
+> In our trial runs (8 judgments per workflow run), provider calls for judgment went from 8 to 1, tokens spent on judgment dropped by about 83%, and total judgment time went from 39 s to 4 s. Results depend on your workflows and reports.
+>
+> **Install this fork** (the `takt` package on npm is the upstream release, not this fork; Node.js 22.22 or later is required):
+>
+> ```bash
+> git clone https://github.com/tyotyolane681/takt.git && cd takt
+> npm ci && npm run build && npm install -g .
+> ```
+>
+> Report issues specific to this fork [here](https://github.com/tyotyolane681/takt/issues), not to upstream. The rest of this README is the upstream documentation.
+
 <p align="center">
   <a href="https://nrslib.github.io/takt/#tutorial">
     <img src="./docs/assets/tutorial-preview.gif" alt="TAKT tutorial preview showing a task being described, queued, and executed by multiple AI agents" width="720">

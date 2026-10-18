@@ -21,6 +21,20 @@
   <a href="./README.zh-CN.md">简体中文</a>
 </p>
 
+> [!NOTE]
+> **关于此 fork** — 这是 [nrslib/takt](https://github.com/nrslib/takt) 的非官方 fork，由 [@tyotyolane681](https://github.com/tyotyolane681) 维护，与上游项目无关，也未获其认可。
+>
+> **与上游的区别：** 新增 opt-in 的 `jev` 设置。启用后，Phase 3 的状态判定将由 [Jev](https://docs.typesafe.ai)（TypeSafe）完成，而不是每次判定都启动 provider 会话。默认禁用，因此不启用时与上游行为一致。详见 [使用 Jev 进行状态判定](./configuration.zh-CN.md#使用-jev-进行状态判定)。
+>
+> **安装此 fork**（npm 上的 `takt` 包是上游版本，不是此 fork；需要 Node.js 22.22 或更高版本）：
+>
+> ```bash
+> git clone https://github.com/tyotyolane681/takt.git && cd takt
+> npm ci && npm run build && npm install -g .
+> ```
+>
+> 此 fork 特有的问题请在 [这里](https://github.com/tyotyolane681/takt/issues) 报告，而不是上游。以下为上游文档。
+
 <p align="center">
   <a href="https://nrslib.github.io/takt/#tutorial">
     <img src="./assets/tutorial-preview.gif" alt="展示描述任务、将任务加入队列并由多个 AI 智能体执行的 TAKT 教程预览" width="720">
