@@ -219,6 +219,11 @@ export class GlobalConfigManager {
         runAbort: parsed.notification_sound_events.run_abort as boolean | undefined,
       } : undefined,
       autoFetch: parsed.auto_fetch,
+      jev: parsed.jev ? {
+        mode: parsed.jev.mode,
+        threshold: parsed.jev.threshold,
+        model: parsed.jev.model,
+      } : undefined,
       baseBranch: parsed.base_branch,
       workflowOverrides: normalizeWorkflowOverrides(parsed.workflow_overrides),
       // Project-local keys (also accepted in global config)

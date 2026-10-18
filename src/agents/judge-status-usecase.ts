@@ -66,7 +66,7 @@ export interface JudgeStatusOptions {
 
 export interface JudgeStageLogEntry {
   stage: 1 | 2 | 3;
-  method: 'structured_output' | 'phase3_tag' | 'ai_judge';
+  method: 'structured_output' | 'phase3_tag' | 'ai_judge' | 'jev';
   status: 'done' | 'error' | 'skipped';
   instruction: string;
   response: string;

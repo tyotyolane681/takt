@@ -1,7 +1,7 @@
 import { prepareWorkflowProviderEnvironment, checkResolvedWorkflowProviders } from '../../../infra/config/runtime-provider/execution-preparation.js';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { ProviderNeutralStructuredCaller } from '../../../agents/structured-caller.js';
+import { createStructuredCaller, type StructuredCaller } from '../../../agents/structured-caller.js';
 import type { WorkflowConfig } from '../../../core/models/index.js';
 import type {
   InternalAgentSeats,
@@ -139,7 +139,7 @@ export interface WorkflowExecutionBootstrap {
   observability: ResolvedObservabilityConfig;
   observabilityHandle: OtelFoundationHandle;
   analyticsEmitter: AnalyticsEmitter;
-  structuredCaller: ProviderNeutralStructuredCaller;
+  structuredCaller: StructuredCaller;
   savedSessions: Record<string, string>;
   sessionUpdateHandler: (persona: string, sessionId: string | undefined) => void;
   traceReportMode: TraceReportMode;
@@ -479,6 +479,7 @@ export async function createWorkflowExecutionBootstrap(
     { startTime: runBootstrap.startedAt },
   );
   const globalConfig = resolveWorkflowConfigValues(projectCwd, [
+    'jev',
     'notificationSound',
     'notificationSoundEvents',
     'rateLimitFallback',
@@ -678,7 +679,7 @@ export async function createWorkflowExecutionBootstrap(
     interactiveUserInput,
     workflowSessionId,
   );
-  const structuredCaller = new ProviderNeutralStructuredCaller();
+  const structuredCaller = createStructuredCaller(globalConfig.jev);
   const savedSessions = shouldLoadSavedSessions
     ? (isWorktree
       ? options.sessionStorageDirectory === undefined

@@ -17,7 +17,8 @@ export type RuleMatchMethod =
   | 'auto_select'
   | 'structured_output'
   | 'phase3_tag'
-  | 'ai_judge';
+  | 'ai_judge'
+  | 'jev';
 
 /** Permission mode for tool execution (provider-agnostic) */
 export type PermissionMode = 'readonly' | 'edit' | 'full';

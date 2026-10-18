@@ -13,7 +13,7 @@ export type PhaseUsageType =
 
 export type PhaseUsageStepType = 'agent' | 'system' | 'workflow_call';
 type PhaseName = 'execute' | 'report' | 'judge';
-type JudgeMethod = 'structured_output' | 'phase3_tag' | 'ai_judge';
+type JudgeMethod = 'structured_output' | 'phase3_tag' | 'ai_judge' | 'jev';
 type JudgeStage = 1 | 2 | 3;
 
 export interface PhaseUsageEventLogRecord {
@@ -259,7 +259,7 @@ function getJudgeStage(attributes: Record<string, unknown>, key: string): JudgeS
 
 function getJudgeMethod(attributes: Record<string, unknown>, key: string): JudgeMethod | undefined {
   const value = getString(attributes, key);
-  return value === 'structured_output' || value === 'phase3_tag' || value === 'ai_judge' ? value : undefined;
+  return value === 'structured_output' || value === 'phase3_tag' || value === 'ai_judge' || value === 'jev' ? value : undefined;
 }
 
 function hrTimeToIso(time: readonly [number, number] | undefined): string {

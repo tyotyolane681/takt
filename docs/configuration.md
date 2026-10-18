@@ -237,6 +237,7 @@ Dynamic parallel and `dynamic_facets` selectors use read-only mode with only `Re
 | `pipeline` | object | - | Pipeline template settings |
 | `bookmarks_file` | string | - | Path to bookmarks file |
 | `auto_fetch` | boolean | `false` | Fetch remote before cloning to keep clones up-to-date |
+| `jev` | object | disabled | Opt-in status judgment with Jev (TypeSafe). See [Status judgment with Jev](#status-judgment-with-jev) |
 | `base_branch` | string | - | Base branch for clone creation (defaults to remote default branch) |
 | `workflow_categories_file` | string | - | Path to categories file (see [Workflow categories](#workflow-categories); default overlay path uses `workflow-categories.yaml`) |
 | `vcs_provider` | `"github"` \| `"gitlab"` | auto-detect | VCS provider (auto-detected from git remote URL) |
@@ -250,6 +251,23 @@ Dynamic parallel and `dynamic_facets` selectors use read-only mode with only `Re
 | `workflow_overrides` | object | - | Workflow-level overrides: top-level / per-step / per-persona `quality_gates` (AI directives or `type: command` gates) and `quality_gates_edit_only` |
 | `sync_conflict_resolver` | object | `{ auto_approve_tools: false }` | Sync conflict resolver policy |
 | `observability` | object | disabled | Opt-in OpenTelemetry foundation. `enabled` initializes the SDK, `monitor` writes workflow metrics to `.takt/runs/<run>/monitor.json`, `session_log_exporter` writes a shadow session log from spans, and `usage_events_phase` writes phase-level usage events to `.takt/runs/<run>/logs/<session>-usage-events.phase.jsonl`. With `enabled: true` and `OTEL_EXPORTER_OTLP_ENDPOINT`, TAKT also sends spans and metrics through OTLP using standard `OTEL_EXPORTER_OTLP_*` environment variables; TAKT does not add an OTLP config key. |
+
+## Status Judgment with Jev
+
+With `jev` set, Phase 3 status judgment (picking one rule candidate) is answered by [Jev](https://docs.typesafe.ai) (TypeSafe) instead of a provider call. Each judgment then skips starting a provider session, which cuts token usage and latency.
+
+```yaml
+jev:
+  mode: enforce        # off (default) / shadow / enforce
+  threshold: 0.8       # minimum Jev confidence to adopt its choice in enforce mode (default: 0.8)
+  model: jev-1.13.0    # pin the model the threshold was tuned on (default: jev-1.13.0)
+```
+
+- `shadow`: the provider still decides; whether Jev agreed is recorded in the session log as a judge stage with `method: jev`.
+- `enforce`: Jev's choice is adopted when its confidence is at least `threshold`. On a Jev error, `unsure`, low confidence, or a conflict with an explicit `APPROVE` / `REJECT` verdict in the report, the judgment falls back to the provider. The judge stage records the `fallbackReason`.
+- The API key is read from the `TYPESAFE_API_KEY` environment variable; it is never stored in the config file.
+- Only the judgment instruction (report and judgment criteria) is sent. Email addresses, phone numbers, token-like strings, and names of facilities or people are masked before sending.
+- Override with `TAKT_JEV_MODE` / `TAKT_JEV_THRESHOLD` / `TAKT_JEV_MODEL`.
 
 ## Caccia Review Loop
 

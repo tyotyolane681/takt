@@ -326,7 +326,7 @@ function getJudgeStage(attributes: Record<string, unknown>, key: string): JudgeS
 
 function getJudgeMethod(attributes: Record<string, unknown>, key: string): JudgeMethod | undefined {
   const value = getString(attributes, key);
-  return value === 'structured_output' || value === 'phase3_tag' || value === 'ai_judge' ? value : undefined;
+  return value === 'structured_output' || value === 'phase3_tag' || value === 'ai_judge' || value === 'jev' ? value : undefined;
 }
 
 function getJudgeStatus(attributes: Record<string, unknown>, key: string): JudgeStatus | undefined {

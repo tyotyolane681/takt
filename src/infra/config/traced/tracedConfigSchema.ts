@@ -249,6 +249,10 @@ const GLOBAL_TRACKED_KEYS = [
   'notification_sound_events.run_complete',
   'notification_sound_events.run_abort',
   'auto_fetch',
+  'jev',
+  'jev.mode',
+  'jev.threshold',
+  'jev.model',
   'base_branch',
   ...PROVIDER_OPTIONS_TRACKED_KEYS,
 ] as const;

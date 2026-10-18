@@ -22,7 +22,7 @@ export const USAGE_MISSING_REASONS = {
 export type UsageMissingReason =
   (typeof USAGE_MISSING_REASONS)[keyof typeof USAGE_MISSING_REASONS];
 
-export type JudgmentMatchMethod = 'structured_output' | 'ai_judge' | 'tag_fallback';
+export type JudgmentMatchMethod = 'structured_output' | 'ai_judge' | 'tag_fallback' | 'jev';
 
 export function toJudgmentMatchMethod(
   matchedRuleMethod: RuleMatchMethod | undefined,
@@ -30,6 +30,7 @@ export function toJudgmentMatchMethod(
   switch (matchedRuleMethod) {
     case 'structured_output':
     case 'ai_judge':
+    case 'jev':
       return matchedRuleMethod;
     case 'phase3_tag':
       return 'tag_fallback';

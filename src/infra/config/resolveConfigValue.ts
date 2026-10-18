@@ -157,6 +157,7 @@ const RESOLUTION_REGISTRY: Partial<{ [K in ConfigParameterKey]: ResolutionRule<K
   telemetry: { layers: ['local', 'global'] },
   observability: { layers: ['local', 'global'], mergeMode: 'observability' },
   autoFetch: { layers: ['global'] },
+  jev: { layers: ['global'] },
   baseBranch: { layers: ['local', 'global'] },
   workflowOverrides: { layers: ['local', 'global'] },
 };
