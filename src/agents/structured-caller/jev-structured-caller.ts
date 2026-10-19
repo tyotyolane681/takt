@@ -86,8 +86,23 @@ export class JevStructuredCaller implements StructuredCaller {
       return { candidateIndex: outcome.judgment.candidateIndex, method: 'jev' };
     }
 
-    this.recordStage(options, structuredInstruction, 'skipped', { decision: 'fallback', fallbackReason, ...summarize(outcome) });
-    return delegate();
+    // The phase start is emitted when the delegate resolves its prompt, and a judge stage
+    // recorded before it has no originating phase. Defer the fallback record until then.
+    let didRecordFallback = false;
+    const recordFallback = (): void => {
+      if (didRecordFallback) return;
+      didRecordFallback = true;
+      this.recordStage(options, structuredInstruction, 'skipped', { decision: 'fallback', fallbackReason, ...summarize(outcome) });
+    };
+    const result = await this.inner.judgeStatus(structuredInstruction, tagInstruction, candidates, {
+      ...options,
+      onStructuredPromptResolved: (promptParts) => {
+        options.onStructuredPromptResolved?.(promptParts);
+        recordFallback();
+      },
+    });
+    recordFallback();
+    return result;
   }
 
   evaluateCondition(

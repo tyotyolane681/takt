@@ -81,9 +81,24 @@ describe('JevStructuredCaller (enforce)', () => {
     const decided = await caller.judgeStatus('report', 'tag', CANDIDATES, options);
 
     expect(decided).toEqual({ candidateIndex: 1, method: 'structured_output' });
-    expect(inner.judgeStatus).toHaveBeenCalledWith('report', 'tag', CANDIDATES, options);
+    expect(inner.judgeStatus).toHaveBeenCalledWith('report', 'tag', CANDIDATES, expect.objectContaining({ cwd: options.cwd }));
     expect(stages[0]).toMatchObject({ method: 'jev', status: 'skipped' });
     expect(parseResponse(stages[0])).toMatchObject({ decision: 'fallback', fallbackReason: reason });
+  });
+
+  it('fallback の judge_stage は phase 開始（prompt 解決）の後に記録する', async () => {
+    const { inner, caller, options } = setup('enforce', judgment({ confidence: 0.5 }));
+    const order: string[] = [];
+    options.onStructuredPromptResolved = () => order.push('start');
+    options.onJudgeStage = () => order.push('stage');
+    inner.judgeStatus.mockImplementation(async (_i, _t, _c, opts: JudgeStatusOptions) => {
+      opts.onStructuredPromptResolved?.({ systemPrompt: 's', userInstruction: 'u' });
+      return { candidateIndex: 1, method: 'structured_output' };
+    });
+
+    await caller.judgeStatus('report', 'tag', CANDIDATES, options);
+
+    expect(order).toEqual(['start', 'stage']);
   });
 
   it('レポートの結論 REJECT と食い違う選択は採用しない', async () => {

@@ -329,6 +329,35 @@ describe('runStatusJudgmentPhase', () => {
     })).rejects.toThrow('Status judgment requires iteration for step "review"');
   });
 
+  it('should keep the original error when error phase completion itself throws', async () => {
+    const providerError = new Error('provider resolution failed');
+    const step: WorkflowStep = {
+      name: 'review',
+      persona: 'reviewer',
+      personaDisplayName: 'reviewer',
+      instruction: 'Review',
+      passPreviousResponse: true,
+      rules: [
+        normalizeRule({ condition: 'needs_fix', next: 'fix' }),
+        normalizeRule({ condition: 'approved', next: 'COMPLETE' }),
+      ],
+    };
+
+    await expect(runStatusJudgmentPhase(step, {
+      cwd: '/tmp/project',
+      reportDir: '/tmp/project/.takt/reports',
+      lastResponse: 'response body',
+      iteration: 4,
+      resolveStepProviderModel: vi.fn(() => {
+        throw providerError;
+      }),
+      structuredCaller: { judgeStatus: vi.fn() },
+      onPhaseComplete: vi.fn(() => {
+        throw new Error('Phase completion has no originating workflow stack: review:3');
+      }),
+    })).rejects.toThrow(providerError);
+  });
+
   it('should emit error phase completion when provider resolution fails', async () => {
     const structuredCaller = {
       judgeStatus: vi.fn().mockResolvedValue({ candidateIndex: 0, method: 'structured_output' }),

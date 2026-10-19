@@ -213,7 +213,16 @@ export async function runStatusJudgmentPhase(
       ctx.onProviderAttempt?.(stepProvider, false, undefined);
     }
     const errorMsg = error instanceof Error ? error.message : String(error);
-    ctx.onPhaseComplete?.(step, 3, 'judge', '', 'error', errorMsg, phaseExecutionId, ctx.iteration);
+    try {
+      ctx.onPhaseComplete?.(step, 3, 'judge', '', 'error', errorMsg, phaseExecutionId, ctx.iteration);
+    } catch (completeError) {
+      // Never let a failed completion notice replace the original judge failure.
+      log.error('Failed to report judge phase error', {
+        step: step.name,
+        originalError: errorMsg,
+        completeError: completeError instanceof Error ? completeError.message : String(completeError),
+      });
+    }
     throw error;
   }
 }
