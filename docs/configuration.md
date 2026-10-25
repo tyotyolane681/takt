@@ -252,6 +252,8 @@ Dynamic parallel and `dynamic_facets` selectors use read-only mode with only `Re
 | `sync_conflict_resolver` | object | `{ auto_approve_tools: false }` | Sync conflict resolver policy |
 | `observability` | object | disabled | Opt-in OpenTelemetry foundation. `enabled` initializes the SDK, `monitor` writes workflow metrics to `.takt/runs/<run>/monitor.json`, `session_log_exporter` writes a shadow session log from spans, and `usage_events_phase` writes phase-level usage events to `.takt/runs/<run>/logs/<session>-usage-events.phase.jsonl`. With `enabled: true` and `OTEL_EXPORTER_OTLP_ENDPOINT`, TAKT also sends spans and metrics through OTLP using standard `OTEL_EXPORTER_OTLP_*` environment variables; TAKT does not add an OTLP config key. |
 
+Codex, Claude SDK, claude-headless, and Copilot retry transient HTTP 429 failures with the same provider up to eight times, waiting 1, 2, 4, 8, 16, 30, 30, and 30 seconds. Codex, Claude SDK, claude-headless, Copilot, and OpenCode do not automatically retry a 429 after observing a tool execution event, so workspace operations are not repeated. OpenCode shares its attempt budget with other transient failures and retries up to twice (three attempts total), waiting 250ms and 500ms. A successful retry completes normally. Explicit usage, credit, or spend-cap exhaustion proceeds immediately to `rate_limit_fallback.switch_chain`; persistent throttling proceeds there after the retry budget is consumed. Exhaustion takes precedence when both occur in the same failure. Without a fallback provider, execution aborts as before. There are no retry configuration keys, and existing retry conditions for other failures remain unchanged.
+
 ## Status Judgment with Jev
 
 With `jev` set, Phase 3 status judgment (picking one rule candidate) is answered by [Jev](https://docs.typesafe.ai) (TypeSafe) instead of a provider call. Each judgment then skips starting a provider session, which cuts token usage and latency.
@@ -281,7 +283,9 @@ caccia:
   workflow: caccia        # Workflow used to judge and fix each set of threads
 ```
 
-The `caccia` effect waits for CodeRabbit only when `enabled` is `true`; otherwise it returns `skipped` with `skipReason: config_disabled` immediately. The standalone `takt caccia <PR-number>` command is available regardless of this flag. Defaults are disabled, 1,800,000 milliseconds, 3 iterations, and workflow `caccia`. A project `caccia` block takes precedence over the global block; omitted fields in the selected block receive these defaults. Set `workflow` to a workflow identifier to replace the builtin workflow.
+The `caccia` effect waits for CodeRabbit only when `enabled` is `true`; otherwise it skips the review wait and returns `skipped` with `skipReason: config_disabled`. The standalone `takt caccia <PR-number>` command is available regardless of this flag. Defaults are disabled, 1,800,000 milliseconds, 3 iterations, and workflow `caccia`. A project `caccia` block takes precedence over the global block; omitted fields in the selected block receive these defaults. Set `workflow` to a workflow identifier to replace the builtin workflow.
+
+If the GitHub PR head differs from the clone's starting HEAD, the effect fetches PR details every 2 seconds before execution for up to 60 seconds, including fetch time. Inconsistent head observations within a PR details fetch also trigger a retry within the same deadline. It continues only on the expected SHA; a mismatch at the deadline returns an `error` containing the expected SHA and the last observed SHA. If the last observation was inconsistent, both conflicting SHAs are included. Authentication failures and other fetch errors, PR identity changes, and cancellation fail immediately. This also applies before recording a skip when execution metadata and a push recorder are present, so disabled or unset configuration may still wait for this check. This wait is fixed and is independent of the review setting `wait_timeout_ms`.
 
 `wait_timeout_ms` bounds the initial review wait and each pushed-commit review wait, including a retry request. If a CodeRabbit rate-limit notice gives a retry time before the deadline, Caccia requests one review when that time arrives; a retry time at or beyond the deadline skips Caccia immediately. A review still incomplete at the deadline after a rate-limit notice also skips Caccia. Without a rate-limit notice, an initial timeout skips Caccia and a pushed-commit timeout is an error. The standalone command exits non-zero in either case; the system effect returns failures as `success: false` with `error` for workflow routing.
 
@@ -448,6 +452,30 @@ same config resolution order as other env-backed task execution settings:
 number parsing. Non-numeric values, negative values, and non-integers fail config
 validation. `TAKT_IGNORE_EXCEED` accepts only `true` or `false`; any other value
 fails config validation.
+
+## Alloy concurrency and JVM settings
+
+These environment variables are read once at the start of verification. They are not YAML keys and do not apply to Quint-only verification.
+
+| Environment variable | Default | Format |
+|----------------------|---------|--------|
+| `TAKT_ALLOY_CONCURRENCY` | `2` | Positive safe integer; `1` runs sequentially |
+| `TAKT_ALLOY_HEAP` | `4g` | Positive integer followed by lowercase `k`, `m`, or `g` |
+| `TAKT_ALLOY_STACK` | `64m` | Positive integer followed by lowercase `k`, `m`, or `g` |
+
+Only unset values use defaults; empty or invalid values produce an error naming the variable. Settings stay fixed for one verification. All Alloy JVM launches, including command enumeration, receive `-Xmx4g -Xss64m` by default. Overrides replace the defaults without duplicate arguments.
+
+```bash
+TAKT_ALLOY_CONCURRENCY=1 TAKT_ALLOY_HEAP=2g TAKT_ALLOY_STACK=128m takt
+```
+
+If memory is limited, lower the heap limit or set concurrency to 1. Use these TAKT-specific settings to change the JVM arguments instead of relying on `JAVA_TOOL_OPTIONS` alone.
+
+`assistant.formal_spec.model_check_timeout_seconds` applies separately to each Alloy command (default: 900 seconds). There is no overall timeout; failures and timeouts do not prevent the remaining commands from running. A free slot starts the next command immediately. Each command result identifies a timeout with `timedOut: true`.
+
+Failed, errored, or timed-out verification retains specifications and logs under `.takt/runs/verify-*/` and reports the directory in the result message. Retained directories are excluded from automatic cleanup; remove them manually when no longer needed. Successful verification artifacts are deleted after result interpretation.
+
+If writing the retention marker fails, TAKT moves the ownership marker to the retention marker and reports the directory and write error. If the move also fails, TAKT leaves the ownership marker in place and reports that retention could not be confirmed, together with the directory and both errors. The remaining ownership marker protects the directory from automatic cleanup even after the owner Node process exits. Copy any needed artifacts manually.
 
 ## Environment Variable Overrides
 
@@ -950,6 +978,15 @@ Differently named profiles and assignments from both layers survive the merge; a
 project entry replaces the global entry entirely.
 
 Define named provider, model, and options combinations under `provider.profiles`. `capabilities` can name a provider-options preset, resolved project → global → builtin; a profile's `options` take precedence. Add `permission_mode` if needed, or `extends` to inherit another profile. A project profile replaces a same-named global profile in full.
+
+`provider` remains required after inheritance. You may omit `model` for codex, claude, claude-sdk, claude-headless, claude-terminal, copilot, cursor, kiro, pi, deepseek-harness, and mock. A child profile inherits its parent's model through `extends`; if no model remains after inheritance, TAKT delegates to the provider's default model. It does not fill in a model from unselected defaults or another lower-priority profile. An explicit CLI `--model` or `TAKT_MODEL` environment variable takes precedence. OpenCode is the exception: it requires `model` in `provider/model` format.
+
+```yaml
+provider:
+  profiles:
+    provider-default: { provider: codex }
+  defaults: { profile: provider-default }
+```
 
 To restrict an internal agent's permissions, assign a profile with `capabilities` or `permission_mode`. Without either, normal provider settings apply.
 

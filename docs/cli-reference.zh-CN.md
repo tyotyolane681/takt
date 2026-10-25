@@ -121,10 +121,10 @@ takt hello
 | `/model <value>` | 为当前会话指定任意 model 名称。 |
 | `/effort <value>` | 为当前会话指定任意推理强度。 |
 | `/tell [指令]` | 选择一个正在运行的 worktree clone 任务，确认追加指令后发送。省略指令时只根据与该任务相关的最新话题生成可独立理解的追加指令正文。需要交互式终端；无法确认时不会发送指令。 |
-| `/requeue [补充说明]` | 在 assistant 或 grill-me 对话中重新排队 failed 或 exceeded 任务。补充说明作为最后的用户发言传给任务和起点的判断。AI 无法决定或判断失败时，由用户从候选列表中选择。显示任务信息后请求 Y/n 确认。没有补充说明的 exceeded 任务保留已保存的停止位置。 |
-| `/retry [补充说明]` | 在 assistant 或 grill-me 对话中，根据对话确定 failed 任务，生成完整的修订 order，并通过 Save task / Continue 确认。 |
+| `/requeue [补充说明]` | 在 assistant 或 grill-me 对话中重新排队 failed 或 exceeded 任务。独立 AI 调用使用对话要点和补充说明。格式错误或候选外响应会重新询问一次，仍无效时切换到手动选择。显示任务信息后请求 Y/n 确认。没有补充说明的 exceeded 任务保留已保存的停止位置。 |
+| `/retry [补充说明]` | 在 assistant 或 grill-me 对话中，选择 failed 任务和起点；格式错误或候选外响应会重新询问一次，仍无效时切换到手动选择。生成完整的修订 order，并通过 Save task / Continue 确认。 |
 
-`/requeue` 和 assistant 对话中的 `/retry` 仅在 CLI/TUI 的 `assistant` 与 `grill-me` 模式可用。`/requeue` 可处理 failed 和 exceeded；`/retry` 只处理 failed。`/requeue` 的补充说明会作为对话最后的用户发言传给任务选择和起点选择，不会与候选名称进行机械匹配。AI 无法确定目标或起点、返回无效结果或判断失败时，会显示可用候选供用户选择。对于 exceeded 任务，附加说明用于选择继续已保存的执行或从指定步骤（包括子 workflow 的步骤）重新执行；没有附加说明时保留已保存的停止位置。`/retry` 保持原有行为，无法唯一确定目标或起点时只返回提示。两种命令都在没有候选时返回提示。`/requeue` 显示任务名称、摘要、workflow 和起点，经 Y/n 批准后将任务置为 `pending`，不修改 `order.md`。取消选择或确认不会修改任务，结果会记录在对话中。`/retry` 显示同样的任务信息和完整修订 order；选择 **Save task** 会归档旧版并将任务置为 `pending`，选择 **Continue** 则不修改任务并返回对话。两种操作都不会立即启动 workflow，且需要交互式终端；没有 TTY 时不会显示选择或修改任务。在 persona 对话和 Web UI 中，这些命令文本作为普通消息处理。`takt resume` 专用 retry 对话中的现有 `/retry` 属于独立路径。在 Workflow Maker（`takt make`）中，这些字符串不会执行任务操作，而是作为普通对话消息发送给 provider。
+`/requeue` 和 assistant 对话中的 `/retry` 仅在 CLI/TUI 的 `assistant` 与 `grill-me` 模式可用。`/requeue` 可处理 failed 和 exceeded；`/retry` 只处理 failed。两种命令都使用独立 AI 调用，传入最近达成的一致意见、补充说明、候选的完整路径和子 workflow 标题说明。每个选择阶段对格式错误或候选外响应重新询问一次，仍无效时切换到手动菜单，并区分 JSON 格式错误、未知任务名称和未知起点 ID。无法判断或 provider 失败时直接进入手动选择。对于 exceeded 任务，附加说明用于选择继续已保存的执行或从指定步骤（包括子 workflow 的步骤）重新执行；没有附加说明时保留已保存的停止位置。两种命令都在没有候选时返回提示。`/requeue` 显示任务名称、摘要、workflow 和起点，经 Y/n 批准后将任务置为 `pending`，不修改 `order.md`。取消选择或确认不会修改任务，结果会记录在对话中。`/retry` 显示同样的任务信息和完整修订 order；选择 **Save task** 会归档旧版并将任务置为 `pending`，选择 **Continue** 则不修改任务并返回对话。两种操作都不会立即启动 workflow，且需要交互式终端；没有 TTY 时不会显示选择或修改任务。在 persona 对话和 Web UI 中，这些命令文本作为普通消息处理。`takt resume` 专用 retry 对话中的现有 `/retry` 属于独立路径。在 Workflow Maker（`takt make`）中，这些字符串不会执行任务操作，而是作为普通对话消息发送给 provider。
 
 这些选择只在当前会话中有效，不会持久化。workflow、mode、provider 或 model 的更改会在下一条普通消息或 `/go` 时创建新的 AI session，并只将之前的对话作为参考上下文传递一次。仅更改 effort 时，会应用到当前 session 的下一次调用。更改 provider 会清除临时 model 和 effort。在下一次输入前执行多个设置命令时，每项设置只应用最后一次选择的值。会话 override 不影响 workflow 执行。
 
@@ -278,6 +278,8 @@ MCP 可以加入任务队列、读取 task/run 状态，并向正在运行的 cl
 
 `takt_list_tasks` 在单个任务的 worktree 验证或 run 元数据读取失败时仍返回全部任务。仅有问题的条目会在已取得的基本信息旁增加已清理的 `error` 字符串，其他条目的内容保持不变。不会读取验证失败的 worktree 中的 run 信息。队列本身无法读取或 `cwd` 超出允许范围时，仍返回整个工具的错误，不返回任务数组。
 
+`takt_tell_run` 和 CLI 的 `/tell` 会在投递成功后将追加指令写入任务的源 `order.md`，并更新正在运行的 run 的 `context/task/order.md`。保存成功时，每次追加都会保留指令 ID 和接收时间，供后续 agent 和恢复后的 run 读取。如果保存失败，会向标准错误输出警告；已投递的指令不受影响，tell 仍然成功。
+
 ## 即时 Exec 模式
 
 `takt exec` 启动无需手写 workflow YAML 的交互式任务录入模式。Assistant agent 澄清需求，`/go` 将对话转换成生成的 workflow，Worker agent 实现任务，Review agent 审查结果，Replanning agent 在需要时询问用户方向，循环检测防止无效循环。
@@ -387,6 +389,8 @@ takt list --non-interactive --format json
 ```
 
 `--action` 接受 `diff`、`sync`、`try`、`merge` 或 `delete`。非交互操作需要 `--branch`，`delete` 还需要 `--yes`。交互模式中的 **Merge from root** 会将根仓库 HEAD 合并到任务分支，并使用 AI 辅助解决冲突。
+
+在交互模式中，**Delete selected…** 会打开复选列表，只显示非运行中的任务。按 Space 切换选择，按 Enter 确定，然后只需进行一次显示所选数量的删除确认。未选择任务、取消选择或拒绝确认时不会删除任何任务，并返回菜单。每个任务使用与单独 **Delete** 相同的清理流程，包括分支和 merge 任务的克隆。某个任务删除失败后仍会继续处理其余任务，最后以 `Deleted M of N tasks.` 显示成功数和所选总数。**All Delete** 和单独 **Delete** 保持原有行为。
 
 #### 咨询运行中的任务
 
@@ -607,13 +611,20 @@ takt purge --retention-days 14
 
 ### `takt merge`
 
-GitLab 支持指定 MR 编号和批量选择。Caccia 返回原因是 `github_unavailable` 的 `skipped`，然后 workflow 等待返回 head 的 CI。合并方式和 head 限制仍不受支持，使用这些参数的合并操作会失败。仅完成 CI 等待不计为合并成功。
+只接受一个位置参数：纯十进制数字作为 PR 编号，其他文本作为 AI 筛选条件。指定编号时忽略筛选条件和 AI 判断，只处理该 PR。指定文本时，先应用现有 CLI 条件或 `merge.where` 配置以及 draft/fork 排除规则，再由 AI 判断剩余候选。判断材料包括标题、正文、标签、head/base 分支名称和全部变更文件路径，不包括差异正文或审查评论。只指定文本时保留配置中的筛选条件。
+
+所有候选均返回有效的结构化判断后，显示选中的 PR 编号及理由和排除的 PR 编号，无需确认即可执行选中的 PR workflow。判断缺失或无效、提供商错误、材料获取失败或文件列表不完整时，不启动任何 PR workflow，并以非零退出码结束。候选或选中结果为空时，处理数和合并数均为 0，退出码为 0。处理数和实际合并数的显示保持原有含义。
 
 默认使用 `merge-review-fix-simple` workflow：由一个只读审查代理进行审查，再由独立步骤裁定问题、规划和实施修复、验证并重新审查。需要并行审查时，可指定 `--workflow merge-review-fix`。不指定 PR 编号时，默认同时处理 2 个 PR；`merge.concurrency` 可更改默认值，`--concurrency` 可覆盖本次运行。指定编号时只处理该 PR。合并 builtin 明确执行 Caccia：`merge-review` 按 `review → caccia → wait_ci → 评价评论` 执行，`merge-review-fix` 和 `merge-review-fix-simple` 按 `review/fix → commit_and_push → caccia → wait_ci → merge_pr` 执行。`success` 与 `skipped` 继续等待返回 head 的 CI。`limit` 评论未解决线程数后以 COMPLETE 结束，不合并；执行错误评论 `error` 后以 ABORT 结束。push、任务后处理和 Pipeline 不再隐式启动 Caccia。设置 `merge.auto_start: true` 时，PR 发布后启动合并 workflow，由其明确的 effect 执行 Caccia。
+
+`merge-review-fix` 和 `merge-review-fix-simple` 在每次 CI 确定失败后，使用失败检查、run/attempt/job 引用、日志内容、PR 累计差异及相关代码进行调查。仓库缺陷（包括不稳定测试及 main 上也存在的失败）在当前 PR 工作树中根本修复，经只读审查后执行 push → Caccia → CI，最多两轮。只有证据证明是外部原因时才允许重跑一次；该预算独立于修复轮数，两轮修复后仍可使用。重跑后等待同一 HEAD 的新 attempt，并重新检查所有检查及既有合并条件。证据不足、两轮修复后仍有缺陷、修复审查 REJECT 或重跑失败时，将次数、最后失败的检查及引用、调查要点评论到 PR，然后 ABORT。调查和修复报告保留在 run 中。初次成功和 CI timeout 行为不变，`merge-review` 仍只发表评论。GitHub Actions 日志及重跑权限不足、Provider 不支持时会明确报告。
+
+GitLab 支持指定 MR 编号和批量选择。Caccia 返回原因是 `github_unavailable` 的 `skipped`，然后 workflow 等待返回 head 的 CI。合并方式和 head 限制仍不受支持，使用这些参数的合并操作会失败。仅完成 CI 等待不计为合并成功。
 
 每个 PR 的合并任务都会显示在 `takt list`。隔离克隆与普通任务使用相同的 `worktree_dir`：默认位于 `../takt-worktrees`，父目录不可写时使用现有的 `.takt/worktrees` 后备位置。失败或冲突时会保留克隆及 Git 合并状态，以便检查。再次运行 `takt merge` 会创建新任务和隔离克隆，并保留失败的任务及克隆。要继续原有任务，请在 `takt list` 中使用 **Requeue**；要修改指令后继续，请使用 **Retry**。继续执行时会重新核对 PR 身份和 fork 风险。同一 PR 的合并任务正在运行或等待执行时，会阻止新任务启动及失败任务继续执行。确认 PR 已合并后才删除克隆。AI 可修改与冲突相关的源码、测试和 lockfile；TAKT 暂存本次修改，并保留此前未暂存或未跟踪的用户改动。
 
 ```bash
 takt merge --concurrency 4
 takt merge 123
+takt merge "仅文档变更"
 ```

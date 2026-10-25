@@ -9,8 +9,10 @@
 import { checkGhCli, fetchIssue, listOpenIssues, createIssue, closeIssue, commentOnIssue } from './issue.js';
 import type { MergeMethod } from '../../core/models/config-types.js';
 import type { PrStatusFetchOptions } from '../../core/workflow/system/pr-execution-context.js';
+import type { PrCiFailure } from '../../core/workflow/system/pr-ci.js';
+import { collectPrCiFailure, rerunPrCi } from './pr-ci.js';
 import type { ListOpenPrsOptions } from '../git/types.js';
-import { fetchPrStatus, fetchPrDetails, fetchPrListItem, findExistingPr, commentOnPr, closePr, createPullRequest, fetchPrReviewComments, listOpenPrNumbers, listOpenPrs, mergePr } from './pr.js';
+import { fetchPrStatus, fetchPrDetails, fetchPrListItem, fetchPrSelectionData, findExistingPr, commentOnPr, closePr, createPullRequest, fetchPrReviewComments, listOpenPrNumbers, listOpenPrs, mergePr } from './pr.js';
 import type { GitProvider, CliStatus, Issue, ExistingPr, IssueListItem, PrListItem, CreateIssueOptions, CreateIssueResult, CloseIssueResult, CreatePrOptions, CreatePrResult, CommentResult, IssueCommentResult, MergeResult, PrReviewData } from '../git/types.js';
 
 export class GitHubProvider implements GitProvider {
@@ -53,6 +55,10 @@ export class GitHubProvider implements GitProvider {
     return fetchPrListItem(prNumber, cwd);
   }
 
+  fetchPrSelectionData(prNumber: number, cwd: string) {
+    return fetchPrSelectionData(prNumber, cwd);
+  }
+
   findExistingPr(branch: string, cwd?: string): ExistingPr | undefined {
     return findExistingPr(branch, cwd ?? process.cwd());
   }
@@ -79,6 +85,15 @@ export class GitHubProvider implements GitProvider {
 
   fetchPrStatus(prNumber: number, cwd?: string, options?: PrStatusFetchOptions) {
     return fetchPrStatus(prNumber, cwd ?? process.cwd(), options);
+  }
+
+  async fetchPrCiFailure(prNumber: number, headSha: string, cwd: string, options?: PrStatusFetchOptions) {
+    const status = await fetchPrStatus(prNumber, cwd, options);
+    return collectPrCiFailure(status, headSha, cwd, options);
+  }
+
+  rerunPrCi(failure: PrCiFailure, cwd: string, options?: PrStatusFetchOptions) {
+    return rerunPrCi(failure, cwd, options);
   }
 
   fetchPrDetails(prNumber: number, cwd?: string, signal?: AbortSignal) {

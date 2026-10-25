@@ -46,6 +46,7 @@ function setup(mode: JevStructuredCallerOptions['mode'], result: JevJudgment | E
   const stages: JudgeStageLogEntry[] = [];
   const onStructuredPromptResolved = vi.fn();
   const options: JudgeStatusOptions = {
+    judgmentInput: 'report',
     cwd: '/tmp/project',
     stepName: 'ai_review',
     onJudgeStage: (entry) => stages.push(entry),

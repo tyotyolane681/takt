@@ -245,6 +245,8 @@ assistant:
 | `sync_conflict_resolver` | object | `{ auto_approve_tools: false }` | sync conflict resolver 策略 |
 | `observability` | object | disabled | opt-in OpenTelemetry 基础设施 |
 
+Codex、Claude SDK、claude-headless 和 Copilot 对临时 HTTP 429 错误使用同一 provider 最多重试 8 次，等待时间依次为 1、2、4、8、16、30、30、30 秒。Codex、Claude SDK、claude-headless、Copilot 和 OpenCode 在观察到工具执行事件后收到 429 时不会自动重试，以免重复执行工作区操作。OpenCode 与其他临时错误共享尝试预算，最多重试 2 次（共尝试 3 次），等待时间为 250ms 和 500ms。重试成功则正常完成。明确匹配已知额度耗尽信号的通知会立即进入 `rate_limit_fallback.switch_chain`；持续的临时限流会在重试预算耗尽后进入该流程。同一错误同时包含限流和额度耗尽时，以额度耗尽为准。未配置切换目标时仍会停止执行。没有与重试相关的配置项，其他错误的现有重试条件保持不变。
+
 ## 使用 Jev 进行状态判定
 
 设置 `jev` 后，Phase 3 的状态判定（从规则候选中选择一个）将由 [Jev](https://docs.typesafe.ai)（TypeSafe）完成，而不是调用 provider。每次判定无需启动 provider 会话，从而减少 token 消耗和等待时间。
@@ -274,7 +276,9 @@ caccia:
   workflow: caccia        # 用于判断和修复每组线程的 workflow
 ```
 
-`caccia` effect 只有在 `enabled: true` 时等待 CodeRabbit；关闭时立即返回 `skipped` 和 `skipReason: config_disabled`。无论该开关为何值，都可以手动运行 `takt caccia <PR-number>`。默认值为关闭、1,800,000 毫秒、3 轮和 workflow `caccia`。如果项目中存在 `caccia` 配置块，它整体优先于全局块；所选配置块中省略的字段使用上述默认值。将 `workflow` 设置为 workflow 标识符即可替换 builtin workflow。
+`caccia` effect 只有在 `enabled: true` 时等待 CodeRabbit；关闭时跳过审查等待并返回 `skipped` 和 `skipReason: config_disabled`。无论该开关为何值，都可以手动运行 `takt caccia <PR-number>`。默认值为关闭、1,800,000 毫秒、3 轮和 workflow `caccia`。如果项目中存在 `caccia` 配置块，它整体优先于全局块；所选配置块中省略的字段使用上述默认值。将 `workflow` 设置为 workflow 标识符即可替换 builtin workflow。
+
+如果 GitHub PR head 与 clone 开始时的 HEAD 不一致，effect 会在执行前每隔2秒重新获取 PR 信息，包含获取时间在内最多等待60秒。同一次 PR 信息获取中观测到不同 head 时，也在同一期限内重试。只有与预期 SHA 一致时才继续；到期仍不一致则返回包含预期 SHA 和最后观测到的 SHA 的 `error`。如果最后一次观测不一致，还会显示冲突的两个 SHA。认证失败等其他获取异常、PR 身份信息变化或取消都会立即导致失败。存在执行元数据和 push 记录器时，记录跳过结果前也会执行此检查，因此关闭或未配置时仍可能等待。此等待为固定值，独立于审查设置 `wait_timeout_ms`。
 
 `wait_timeout_ms` 规定初次审查和每次推送后复审的等待期限，重新请求审查也包含在内。若审查限额通知给出的可重试时间早于期限，Caccia 会在该时间到达时请求一次审查；若可重试时间为期限或更晚，则立即跳过。收到限额通知后，审查到期限仍未完成时也会跳过。未收到限额通知时，初次等待超时会跳过，推送后的等待超时会记录为错误。单独命令在跳过或出错时以非零状态退出；system effect 在跳过时返回 `success: true` 与 `outcome: 'skipped'`，出错时返回 `success: false` 和 `error`，供 workflow 分支使用。
 
@@ -447,6 +451,30 @@ TAKT 观察实际收到的 provider event，不会合成 keepalive。OpenCode �
 4. 默认值
 
 `TAKT_AUTO_REQUEUE_MAX_ATTEMPTS` 必须解析为非负整数；非数字、负数和非整数会使配置验证失败。`TAKT_IGNORE_EXCEED` 只接受 `true` 或 `false`。
+
+## Alloy 并发与 JVM 设置
+
+以下环境变量在验证开始时读取一次，不是 YAML 配置键，也不适用于仅含 Quint 的验证。
+
+| 环境变量 | 默认值 | 格式 |
+|----------|--------|------|
+| `TAKT_ALLOY_CONCURRENCY` | `2` | 正安全整数；`1` 为顺序执行 |
+| `TAKT_ALLOY_HEAP` | `4g` | 正整数和小写单位 `k`、`m` 或 `g` |
+| `TAKT_ALLOY_STACK` | `64m` | 正整数和小写单位 `k`、`m` 或 `g` |
+
+仅未设置时使用默认值；空字符串或无效值会产生包含变量名的错误。一次验证期间设置保持不变。包括命令枚举在内的所有 Alloy JVM 默认接收 `-Xmx4g -Xss64m`。覆盖时只传入指定值，不重复传入默认参数。
+
+```bash
+TAKT_ALLOY_CONCURRENCY=1 TAKT_ALLOY_HEAP=2g TAKT_ALLOY_STACK=128m takt
+```
+
+内存不足时，请降低堆上限或将并发数设为 1。请使用这些 TAKT 专用设置修改 JVM 参数，不要仅依赖 `JAVA_TOOL_OPTIONS`。
+
+`assistant.formal_spec.model_check_timeout_seconds` 分别适用于每条 Alloy 命令（默认 900 秒），不设置整体超时。失败或超时不会阻止其余命令执行，有空闲位置时立即启动下一条命令。各命令结果通过 `timedOut: true` 标识超时。
+
+验证失败、错误或超时时，`.takt/runs/verify-*/` 中的规范与日志会保留，结果消息会显示目录路径。保留目录不参与自动清理，请在不再需要时手动删除。成功验证的产物在结果解读结束后删除。
+
+如果写入保留标记失败，TAKT 会将所有权标记移动为保留标记，并报告目录路径和写入错误。如果移动也失败，TAKT 会保留所有权标记，提示无法确认保留状态，并报告目录路径和两个错误。即使所属 Node 进程退出，剩余的所有权标记仍会保护目录，使其不被自动清理。请手动复制所需的产物。
 
 ## 环境变量覆盖
 
@@ -774,6 +802,15 @@ takt run --runtime-assignment personal
 两层中不同名称的 profile 和 assignment 在合并后保留；同名 entry 由 project 整体替换。
 
 `provider.profiles` 保存命名的 provider/model/options 定义。`provider.defaults` 必须在每个有效 provider section 中选择一个固定 `profile` 或有序 `ladder`；不能指定 `pool`。`provider.targets.personas`、`provider.targets.tags` 和 `provider.targets.steps` 可以选择固定 profile、有序 ladder 或显式 auto-routing pool；`internal_agents` 只能使用固定 profile 或 ladder；`companions` 必须使用固定 profile。
+
+继承解析后仍必须提供 `provider`。codex、claude、claude-sdk、claude-headless、claude-terminal、copilot、cursor、kiro、pi、deepseek-harness 和 mock 可以省略 `model`。子 profile 通过 `extends` 继承父 profile 的 model；继承后仍没有 model 时，TAKT 使用 provider 自身的默认模型，不从未选中的 defaults 或其他低优先级 profile 补全 model。显式 CLI `--model` 或环境变量 `TAKT_MODEL` 优先。opencode 是例外，必须提供 `provider/model` 格式的 `model`。
+
+```yaml
+provider:
+  profiles:
+    provider-default: { provider: codex }
+  defaults: { profile: provider-default }
+```
 
 provider target 的覆盖优先级为：
 

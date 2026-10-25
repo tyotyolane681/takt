@@ -252,6 +252,8 @@ dynamic parallel と `dynamic_facets` の selector は読み取り専用で、`R
 | `sync_conflict_resolver` | object | `{ auto_approve_tools: false }` | sync conflict resolver ポリシー |
 | `observability` | object | 無効 | OpenTelemetry foundation の opt-in 設定。`enabled` で SDK を初期化し、`monitor` は workflow metric を `.takt/runs/<run>/monitor.json` に出力し、`session_log_exporter` は span 由来の shadow session log を出力します。`usage_events_phase` は phase 粒度の usage events を `.takt/runs/<run>/logs/<session>-usage-events.phase.jsonl` に出力します。`enabled: true` と `OTEL_EXPORTER_OTLP_ENDPOINT` が揃うと、TAKT は標準の `OTEL_EXPORTER_OTLP_*` 環境変数で span と metric も OTLP 送信します。TAKT 独自の OTLP config キーはありません。 |
 
+Codex、Claude SDK、claude-headless、Copilotの一時的なHTTP 429は同じproviderで最大8回再試行します。待機時間は1、2、4、8、16、30、30、30秒です。Codex、Claude SDK、claude-headless、Copilot、OpenCodeでツール実行イベントを観測した試行では429を受けても操作の重複を防ぐため自動再試行しません。OpenCodeは通常の一時障害と試行予算を共有し、250ms・500ms待機して最大2回再試行します（合計3試行）。再試行で成功すれば通常完了します。使用枠・クレジット・spend capの使い切り通知は再試行せず、直ちに`rate_limit_fallback.switch_chain`へ進みます。ツールイベントを観測せずに429が続く場合は再試行予算を消費してから同じ切り替え処理へ進みます。使い切りと429の両方を含む失敗は使い切りとして扱います。切り替え先がなければ従来どおり停止します。再試行の設定項目はありません。429以外の既存の再試行条件は維持します。
+
 ## Jev によるステータス判定
 
 `jev` を設定すると、Phase 3 のステータス判定（ルール候補から1つを選ぶ処理）を、provider の呼び出しの代わりに [Jev](https://docs.typesafe.ai)（TypeSafe）で行います。判定のたびに provider のセッションを起動しなくて済むため、トークン消費と待ち時間を減らせます。
@@ -281,7 +283,9 @@ caccia:
   workflow: caccia        # 各スレッド群の判断と修正に使う workflow
 ```
 
-`caccia` 効果は `enabled: true` の場合だけ CodeRabbit を待ちます。無効なら待たずに `outcome: skipped` と `skipReason: config_disabled` を返します。単独実行の `takt caccia <PR番号>` はこのフラグに関係なく利用できます。既定値は無効、1,800,000 ミリ秒、3 回、workflow `caccia` です。project に `caccia` ブロックがある場合は global のブロックより優先し、省略した項目には上記の既定値を適用します。`workflow` に workflow 識別子を指定するとビルトイン workflow を差し替えられます。
+`caccia` 効果は `enabled: true` の場合だけ CodeRabbit を待ちます。無効ならレビューを待たずに `outcome: skipped` と `skipReason: config_disabled` を返します。単独実行の `takt caccia <PR番号>` はこのフラグに関係なく利用できます。既定値は無効、1,800,000 ミリ秒、3 回、workflow `caccia` です。project に `caccia` ブロックがある場合は global のブロックより優先し、省略した項目には上記の既定値を適用します。`workflow` に workflow 識別子を指定するとビルトイン workflow を差し替えられます。
+
+GitHub の PR head と開始時のクローン HEAD が不一致なら、効果は実行前に2秒間隔で PR 情報を再取得し、取得時間を含めて最大60秒待ちます。PR 情報の取得中に異なる head を観測した場合も同じ期限内で再取得します。期待 SHA と一致した場合だけ続行し、期限まで不一致なら期待 SHA と最後に観測した SHA を含む `error` を返します。最後の観測が不整合だった場合は食い違った両方の SHA も示します。認証失敗など他の取得例外、PR の識別情報変更、中断は直ちに失敗とします。実行文脈と push 記録先がある場合はスキップ記録前にも適用するため、無効・未設定でもこの照合を待つことがあります。この待機は固定値で、レビュー待機の `wait_timeout_ms` では変更されません。
 
 `wait_timeout_ms` は初回と各 Push 後のレビュー待機期限で、再依頼もこの期限に含みます。レビュー制限通知の再試行時刻が期限より前なら到来時に一度だけレビューを依頼し、期限以降なら直ちにスキップします。制限通知を受けた後、レビューが期限までに完了しなければスキップします。制限通知を受けずに期限に達した場合は初回待機をスキップし、Push 後の待機をエラーとします。単独コマンドはいずれも非ゼロで終了し、system 効果は失敗を `success: false` と `error` で返し、workflow のルールで分岐します。
 
@@ -444,6 +448,30 @@ OpenCode の `event_limit` は既定で 500,000、`text_byte_limit` は 1 MiB、
 数値でない値、負数、整数でない値は config validation に失敗します。
 `TAKT_IGNORE_EXCEED` は `true` または `false` のみ受け付け、それ以外の値は config
 validation に失敗します。
+
+## Alloyの並列実行とJVM設定
+
+次の環境変数を検証開始時に読み取ります。YAMLの設定キーではありません。Quintだけの検証には適用しません。
+
+| 環境変数 | 既定値 | 入力形式 |
+|----------|--------|----------|
+| `TAKT_ALLOY_CONCURRENCY` | `2` | 正の安全な整数。`1`で順次実行 |
+| `TAKT_ALLOY_HEAP` | `4g` | 正の整数と小文字の単位`k`・`m`・`g` |
+| `TAKT_ALLOY_STACK` | `64m` | 正の整数と小文字の単位`k`・`m`・`g` |
+
+未指定時だけ既定値を使い、空文字列や不正値は変数名を含むエラーになります。設定値は検証1回の間で固定されます。Alloyのコマンド列挙と各コマンドのJVMには、既定で`-Xmx4g -Xss64m`を渡します。上書きすると指定値だけを渡します。
+
+```bash
+TAKT_ALLOY_CONCURRENCY=1 TAKT_ALLOY_HEAP=2g TAKT_ALLOY_STACK=128m takt
+```
+
+メモリが不足する場合はヒープ上限を下げるか、同時実行数を1にしてください。上記のTAKT専用設定でJVM引数を変更できます。`JAVA_TOOL_OPTIONS`だけでこれらの値を上書きしないでください。
+
+`assistant.formal_spec.model_check_timeout_seconds`はAlloyの各コマンドに個別に適用されます（既定900秒）。全体の上限時間は設けず、時間切れや失敗があっても残りを実行します。空いた枠には次のコマンドをすぐに投入します。各コマンド結果の`timedOut: true`が時間切れを示します。
+
+検証の失敗・エラー・時間切れでは`.takt/runs/verify-*/`の仕様とログを保持し、保存先を結果メッセージに表示します。保持したディレクトリは自動掃除の対象外です。不要になったら手動で削除してください。成功時は結果の解釈が終わってから削除します。
+
+保持マーカーの書き込みに失敗した場合は所有権マーカーを保持マーカーへ移動し、保存先と書き込みエラーを通知します。移動にも失敗した場合は所有権マーカーを残し、保持を確定できない旨と保存先、両方のエラーを通知します。残った所有権マーカーは所有するNodeプロセスの終了後もディレクトリを自動掃除から保護します。必要な成果物を手動で退避してください。
 
 ## 環境変数上書き
 
@@ -932,6 +960,15 @@ takt run --runtime-assignment personal
 両層の異なる名前の profile と assignment は合成後も残り、同名の場合は project の entry が全体を置き換えます。
 
 `provider.profiles` に provider、model、options を名前付きで定義します。`capabilities` には provider-options preset 名を指定でき、project → global → builtin の順に探します。profile の `options` は preset より優先されます。必要なら `permission_mode` や別の profile を継承する `extends` も指定できます。global と project に同名の profile がある場合は project の定義が全体を置き換えます。
+
+`provider` は継承解決後も必須です。codex、claude、claude-sdk、claude-headless、claude-terminal、copilot、cursor、kiro、pi、deepseek-harness、mock では `model` を省略できます。`extends` で親に model があれば継承し、継承後も model がなければプロバイダーの既定モデルに委ねます。選択されなかった defaults や低優先度の別 profile から model を補完しません。明示的な CLI `--model` または環境変数 `TAKT_MODEL` は優先されます。opencode は例外で、`provider/model` 形式の `model` が必要です。
+
+```yaml
+provider:
+  profiles:
+    provider-default: { provider: codex }
+  defaults: { profile: provider-default }
+```
 
 内部 agent の権限を制限する場合は、`capabilities` または `permission_mode` を指定した profile を割り当ててください。未指定なら provider の通常設定が使われます。
 

@@ -38,6 +38,13 @@ export interface ListOpenPrsOptions {
   readonly allPages?: boolean;
 }
 
+export interface PrSelectionData {
+  number: number;
+  title: string;
+  body: string;
+  files: string[];
+}
+
 export interface CreatePrOptions {
   branch: string;
   title: string;
@@ -156,6 +163,7 @@ export interface GitProvider {
 
   listOpenPrNumbers?(cwd: string): number[];
   fetchPrListItem?(prNumber: number, cwd: string): PrListItem | undefined;
+  fetchPrSelectionData?(prNumber: number, cwd: string): PrSelectionData;
 
   findExistingPr(branch: string, cwd?: string): ExistingPr | undefined;
 
@@ -169,6 +177,12 @@ export interface GitProvider {
 
   mergePr(prNumber: number, cwd?: string, method?: import('../../core/models/config-types.js').MergeMethod, expectedHeadSha?: string): MergeResult;
 
+  fetchPrCiFailure?(prNumber: number, headSha: string, cwd: string,
+    options?: import('../../core/workflow/system/pr-execution-context.js').PrStatusFetchOptions,
+  ): Promise<import('../../core/workflow/system/pr-ci.js').PrCiFailure>;
+  rerunPrCi?(failure: import('../../core/workflow/system/pr-ci.js').PrCiFailure, cwd: string,
+    options?: import('../../core/workflow/system/pr-execution-context.js').PrStatusFetchOptions,
+  ): Promise<import('../../core/workflow/system/pr-ci.js').PrCiRerunResult>;
   fetchPrStatus?(prNumber: number, cwd?: string,
     options?: import('../../core/workflow/system/pr-execution-context.js').PrStatusFetchOptions,
   ): Promise<import('../../core/workflow/system/pr-execution-context.js').PrStatus>;
