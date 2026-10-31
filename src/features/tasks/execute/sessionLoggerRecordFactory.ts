@@ -278,6 +278,7 @@ export function buildPhaseJudgeStageRecord(
     ),
     instruction: sanitizeText(entry.instruction),
     response: sanitizeText(entry.response),
+    ...(entry.providerUsage === undefined ? {} : { usage: serializeCompanionUsage(entry.providerUsage, sanitizeText) }),
     timestamp: new Date().toISOString(),
     ...(iteration != null ? { iteration } : {}),
   };

@@ -195,6 +195,8 @@ export interface NdjsonPhaseJudgeStage {
   status: 'done' | 'error' | 'skipped';
   instruction: string;
   response: string;
+  /** Token usage of the provider call behind this stage. Absent when no provider ran (e.g. method 'jev'). */
+  usage?: NdjsonCompanionUsage;
   timestamp: string;
 }
 
