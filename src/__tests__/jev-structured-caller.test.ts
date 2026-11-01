@@ -72,6 +72,64 @@ describe('JevStructuredCaller (enforce)', () => {
     expect(parseResponse(stages[0])).toMatchObject({ decision: 'jev', step: 1, confidence: 0.95 });
   });
 
+  describe('Jev に渡す入力', () => {
+    const REPORT = '# review.md\n\n## 結果: APPROVE\n\n指摘は0件。';
+    const FULL = [
+      '## 担当とフェーズ\n\n今は ai_review ステップの判定フェーズ（Phase 3）です。',
+      '**判定対象のレポートや回答に書かれた判定結果を、判定基準のルール番号（1始まり）に対応づけてください。**',
+      REPORT,
+      '## 判定基準\n\n| # | 状況 | タグ |\n|---|---|---|\n| 1 | approved | `[AI_REVIEW:1]` |\n| 2 | needs_fix | `[AI_REVIEW:2]` |',
+      '## タスク\n\n- 判定は、この指示に含まれる入力に書かれた内容だけで行ってください。',
+    ].join('\n\n');
+
+    it('レポートと判定基準の表だけを渡し、前置きとタスク案内は渡さない', async () => {
+      const judge = judgeReturning(judgment());
+      const { options } = setup('enforce', judgment());
+      const caller = new JevStructuredCaller(createInner(), { mode: 'enforce', threshold: 0.8, judge });
+
+      await caller.judgeStatus(FULL, 'tag', CANDIDATES, { ...options, judgmentInput: REPORT });
+
+      const sent = vi.mocked(judge.judge).mock.calls[0]?.[0] ?? '';
+      expect(sent.startsWith(REPORT)).toBe(true);
+      expect(sent).toContain('| 2 | needs_fix |');
+      expect(sent).not.toContain('担当とフェーズ');
+      expect(sent).not.toContain('## タスク');
+    });
+
+    it('レポートを指示文の中から見つけられないときは、指示文全体を渡す', async () => {
+      const judge = judgeReturning(judgment());
+      const { options } = setup('enforce', judgment());
+      const caller = new JevStructuredCaller(createInner(), { mode: 'enforce', threshold: 0.8, judge });
+
+      await caller.judgeStatus(FULL, 'tag', CANDIDATES, { ...options, judgmentInput: '指示文にない文字列' });
+
+      expect(vi.mocked(judge.judge).mock.calls[0]?.[0]).toBe(FULL);
+    });
+
+    it.each([
+      ['compact', REPORT],
+      ['full', '指示文にない文字列'],
+    ] as const)('判定ステージの記録に、渡した入力の形式 %s を残す', async (format, judgmentInput) => {
+      const { caller, stages, options } = setup('enforce', judgment());
+
+      await caller.judgeStatus(FULL, 'tag', CANDIDATES, { ...options, judgmentInput });
+
+      expect(parseResponse(stages[0])).toMatchObject({ decision: 'jev', inputFormat: format });
+    });
+
+    it('ログに残す指示文と、レポートの結論との照合には、指示文全体を使う', async () => {
+      const rejectReport = '# review.md\n\n## 結果: REJECT\n\n指摘あり。';
+      const full = FULL.replace(REPORT, rejectReport);
+      const { inner, caller, stages, options } = setup('enforce', judgment({ candidateIndex: 0, confidence: 0.99 }));
+
+      await caller.judgeStatus(full, 'tag', CANDIDATES, { ...options, judgmentInput: rejectReport });
+
+      expect(stages[0]?.instruction).toBe(full);
+      expect(inner.judgeStatus).toHaveBeenCalledTimes(1);
+      expect(parseResponse(stages[0])).toMatchObject({ decision: 'fallback', fallbackReason: 'verdict_conflict' });
+    });
+  });
+
   it.each([
     ['low_confidence', judgment({ confidence: 0.5 })],
     ['unsure', judgment({ candidateIndex: undefined })],

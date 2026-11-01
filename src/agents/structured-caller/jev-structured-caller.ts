@@ -1,6 +1,7 @@
 import type { SemanticRuleCandidate } from '../../core/models/workflow-rule-condition.js';
 import type { JevConfig } from '../../core/models/config-types.js';
 import { createTypeSafeJevJudge, type JevCandidate, type JevJudge, type JevJudgment } from '../../infra/jev/jev-client.js';
+import { buildJevInput } from '../../infra/jev/jev-input.js';
 import type { JudgeStatusOptions, JudgeStatusResult, EvaluateConditionOptions } from '../judge-status-usecase.js';
 import type {
   DecomposeTaskOptions,
@@ -65,14 +66,16 @@ export class JevStructuredCaller implements StructuredCaller {
       index,
       description: describeCandidate(candidate),
     }));
-    const pending = this.askJev(structuredInstruction, jevCandidates);
+    // Jev gets the report and the criteria table; the full instruction stays the one logged and checked.
+    const jevInput = buildJevInput(structuredInstruction, options.judgmentInput);
+    const pending = this.askJev(jevInput.text, jevCandidates);
     const delegate = (): Promise<JudgeStatusResult> =>
       this.inner.judgeStatus(structuredInstruction, tagInstruction, candidates, options);
 
     if (this.options.mode === 'shadow') {
       const result = await delegate();
       const outcome = await pending;
-      this.recordStage(options, structuredInstruction, 'skipped', { decision: 'shadow', ...summarize(outcome), agree: agreesWith(outcome, result) });
+      this.recordStage(options, structuredInstruction, 'skipped', { decision: 'shadow', inputFormat: jevInput.format, ...summarize(outcome), agree: agreesWith(outcome, result) });
       return result;
     }
 
@@ -82,7 +85,7 @@ export class JevStructuredCaller implements StructuredCaller {
     if (fallbackReason === undefined && 'judgment' in outcome && outcome.judgment.candidateIndex !== undefined) {
       // Mirror the single-candidate path: phase start is recorded even though no provider prompt runs.
       options.onStructuredPromptResolved?.({ systemPrompt: '', userInstruction: structuredInstruction });
-      this.recordStage(options, structuredInstruction, 'done', { decision: 'jev', ...summarize(outcome) });
+      this.recordStage(options, structuredInstruction, 'done', { decision: 'jev', inputFormat: jevInput.format, ...summarize(outcome) });
       return { candidateIndex: outcome.judgment.candidateIndex, method: 'jev' };
     }
 
@@ -92,7 +95,7 @@ export class JevStructuredCaller implements StructuredCaller {
     const recordFallback = (): void => {
       if (didRecordFallback) return;
       didRecordFallback = true;
-      this.recordStage(options, structuredInstruction, 'skipped', { decision: 'fallback', fallbackReason, ...summarize(outcome) });
+      this.recordStage(options, structuredInstruction, 'skipped', { decision: 'fallback', fallbackReason, inputFormat: jevInput.format, ...summarize(outcome) });
     };
     const result = await this.inner.judgeStatus(structuredInstruction, tagInstruction, candidates, {
       ...options,
