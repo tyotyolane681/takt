@@ -10,7 +10,7 @@ vi.mock('../shared/utils/private-file-lock.js', () => ({ runPrivateFileExclusive
 
 beforeEach(() => {
   vi.resetAllMocks();
-  doubles.realpath.mockImplementation(async (path: string) => path.replace('/alias/', '/configuration/'));
+  doubles.realpath.mockImplementation(async (path: string) => path.replace(/[\\/]alias(?=[\\/])/, (match) => match.replace('alias', 'configuration')));
   doubles.exclusive.mockImplementation(async (_path: string, action: () => Promise<unknown>) => action());
 });
 

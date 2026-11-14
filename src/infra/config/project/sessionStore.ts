@@ -310,8 +310,8 @@ export function updateWorktreeSession(
 export function getClaudeProjectSessionsDir(projectDir: string): string {
   const resolvedPath = resolve(projectDir);
   // Claude CLI encodes the path by replacing '/' and other special chars with '-'
-  // Based on observed behavior: /Users/takt -> -Users-takt
-  const encodedPath = resolvedPath.replace(/[/\\_ ]/g, '-');
+  // Based on observed behavior: /Users/takt -> -Users-takt, C:\Users\takt -> C--Users-takt
+  const encodedPath = resolvedPath.replace(/[/\\:_ ]/g, '-');
   return join(homedir(), '.claude', 'projects', encodedPath);
 }
 

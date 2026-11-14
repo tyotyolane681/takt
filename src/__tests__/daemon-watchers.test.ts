@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { Dirent } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Admission, EventInput, WatchObservation } from '../core/daemon/events.js';
 import type { CommandPort, CommandResult, ProcessObservation } from '../core/daemon/io.js';
@@ -449,7 +450,7 @@ describe('fs.watchと限定照合', () => {
     filesystem.list.mockResolvedValue([]);
     loop.wake();
     await loop.drain();
-    expect(changed.mock.calls[2]?.[0]).toMatchObject({ removed: true, path: '/inbox/event.json' });
+    expect(changed.mock.calls[2]?.[0]).toMatchObject({ removed: true, path: join('/inbox', 'event.json') });
     await loop.close();
     expect(errors).not.toHaveBeenCalled();
     expect(filesystem.watch.mock.results[0]?.value.close).toHaveBeenCalledOnce();
@@ -504,8 +505,8 @@ describe('fs.watchと限定照合', () => {
     const loop = startDirectoryWatcher({ targets: async () => [{ ...directoryTarget, kind: 'workspaces', directory: '/workspaces' }],
       changed, onError: vi.fn() });
     await loop.drain();
-    expect(filesystem.watch.mock.calls.map((call) => call[0])).toEqual(['/workspaces', `/workspaces/${id}`]);
-    expect(changed.mock.calls[0]?.[0].path).toBe(`/workspaces/${id}/workspace.json`);
+    expect(filesystem.watch.mock.calls.map((call) => call[0])).toEqual(['/workspaces', join('/workspaces', id)]);
+    expect(changed.mock.calls[0]?.[0].path).toBe(join('/workspaces', id, 'workspace.json'));
     await loop.close();
   });
 });

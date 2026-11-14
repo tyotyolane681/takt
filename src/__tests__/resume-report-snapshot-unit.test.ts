@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Stats } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { PrivateDirectoryReadSnapshot } from '../shared/utils/private-file.js';
 
@@ -97,7 +97,7 @@ describe('resume report snapshot with isolated filesystem dependencies', () => {
     });
     io.publish.mockImplementation((_parent: string, staging: string, target: string) => {
       for (const [path, entry] of [...io.entries]) {
-        if (path === staging || path.startsWith(`${staging}/`)) {
+        if (path === staging || path.startsWith(`${staging}${sep}`)) {
           io.entries.set(target + path.slice(staging.length), entry);
           io.entries.delete(path);
         }
@@ -105,7 +105,7 @@ describe('resume report snapshot with isolated filesystem dependencies', () => {
     });
     io.remove.mockImplementation((_parent: string, staging: string) => {
       for (const path of io.entries.keys()) {
-        if (path === staging || path.startsWith(`${staging}/`)) io.entries.delete(path);
+        if (path === staging || path.startsWith(`${staging}${sep}`)) io.entries.delete(path);
       }
     });
   });
