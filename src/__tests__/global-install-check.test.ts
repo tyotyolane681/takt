@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -62,7 +62,7 @@ describe('global installation gate', () => {
     manifestFailure = undefined;
     remove.mockImplementation((path: string) => {
       for (const entry of installations.filter((install) => install.target.startsWith('takt@'))) {
-        if (entry.prefix.startsWith(`${path}/`) || entry.prefix === path) {
+        if (entry.prefix.startsWith(`${path}${sep}`) || entry.prefix === path) {
           const overwritten = installations.some((install) => install.prefix === entry.prefix && install.target.endsWith('.tgz'));
           if (!overwritten) resetPrefixes.push(entry.prefix);
         }
@@ -75,9 +75,9 @@ describe('global installation gate', () => {
       if (!options?.withFileTypes) return ['takt-fixed.tgz'];
       if (emptyDirectories) {
         const directory = (name: string) => ({ name, isDirectory: () => true });
-        if (/\/(?:string-width|emoji-regex)$/.test(path)) return [];
-        if (/\/(?:wrap-ansi|widest-line)\/node_modules$/.test(path)) return ['string-width', 'emoji-regex'].map(directory);
-        if (/\/(?:wrap-ansi|widest-line)$/.test(path)) return [directory('node_modules')];
+        if (/[\\/](?:string-width|emoji-regex)$/.test(path)) return [];
+        if (/[\\/](?:wrap-ansi|widest-line)[\\/]node_modules$/.test(path)) return ['string-width', 'emoji-regex'].map(directory);
+        if (/[\\/](?:wrap-ansi|widest-line)$/.test(path)) return [directory('node_modules')];
         return ['wrap-ansi', 'widest-line'].map(directory);
       }
       return [{ name: 'package.json', isDirectory: () => false }];
@@ -246,7 +246,7 @@ describe('global installation gate', () => {
     expect(result === undefined || result === 0, String(result)).toBe(true);
     expect(callsWith('pack')).toEqual([]);
     expect(installations.filter((entry) => entry.target.endsWith('.tgz')).map((entry) => entry.target))
-      .toEqual(['/release/takt-requested.tgz', '/release/takt-requested.tgz']);
+      .toEqual([resolve('/release/takt-requested.tgz'), resolve('/release/takt-requested.tgz')]);
   });
 
   it.each([
@@ -288,7 +288,7 @@ describe('global installation gate', () => {
     expect(diagnostics).toMatch(/empty director/i);
     for (const parent of ['wrap-ansi', 'widest-line']) {
       for (const dependency of ['string-width', 'emoji-regex']) {
-        expect(diagnostics).toContain(`${parent}/node_modules/${dependency}`);
+        expect(diagnostics).toContain(join(parent, 'node_modules', dependency));
       }
     }
     const completed = installations.filter((entry) => entry.target.endsWith('.tgz'));

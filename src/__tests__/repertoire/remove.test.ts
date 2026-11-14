@@ -170,9 +170,7 @@ describe('repertoireRemoveCommand — scan configuration', () => {
     const [, scanConfig] = vi.mocked(findScopeReferences).mock.calls[0]!;
 
     // Then: the categories file path is correct
-    expect(scanConfig.categoriesFiles).toContain(
-      join('/home/user/.takt', 'preferences', 'workflow-categories.yaml'),
-    );
+    expect(scanConfig.categoriesFiles).toContain('/home/user/.takt/preferences/workflow-categories.yaml');
   });
 
   it('should use the resolved workflow categories path override', async () => {

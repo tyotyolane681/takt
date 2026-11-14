@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 import { GoalStore } from '../infra/goals/store.js';
 import { GoalQuestionSchema } from '../infra/goals/schema.js';
 import {
@@ -17,7 +18,7 @@ vi.mock('../shared/utils/private-file.js', () => ({
 }));
 vi.mock('../shared/utils/private-path-identity.js', () => ({ assertSafePath: vi.fn(), lstatOrUndefined: doubles.lstat }));
 
-const path = `/project/.takt/goals/${goalId}/goal.json`;
+const path = join('/project', '.takt', 'goals', goalId, 'goal.json');
 const questionId = '650e8400-e29b-41d4-a716-446655440001';
 const now = '2026-10-19T01:00:00.000Z';
 const operation = { toolName: 'Bash', args: '{"command":"git status"}', cwd: '/project' };

@@ -7,6 +7,12 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
 
+// The Windows spawn path uses cross-spawn's CommonJS child_process import.
+// Keep it on the same stub so these tests never launch a real CLI.
+vi.mock('cross-spawn', () => ({
+  default: (...args: Parameters<typeof spawn>) => spawn(...args),
+}));
+
 import { spawn } from 'node:child_process';
 import { runHeadlessCli } from '../infra/claude-headless/headless-spawn.js';
 import type { ClaudeHeadlessCallOptions } from '../infra/claude-headless/types.js';

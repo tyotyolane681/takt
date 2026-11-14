@@ -4,6 +4,7 @@ const readFile = vi.hoisted(() => vi.fn());
 vi.mock('node:fs/promises', () => ({ readFile }));
 
 import { cursorApprovalKey, readCursorProjectServers, relocateCursorProjectServer } from '../infra/providers/mcp/cursor-native-config.js';
+import { resolve } from 'node:path';
 
 describe('Cursor native project configuration', () => {
   beforeEach(() => { readFile.mockReset(); });
@@ -48,7 +49,7 @@ describe('Cursor native project configuration', () => {
     expect(relocateCursorProjectServer({ command: './bin/server', args: ['service.js'] }, '/project/subdir', {}))
       .toEqual({ command: './bin/server', args: ['service.js'], cwd: '/project/subdir' });
     expect(relocateCursorProjectServer({ command: 'node', cwd: 'services' }, '/project', {}))
-      .toEqual({ command: 'node', cwd: '/project/services' });
+      .toEqual({ command: 'node', cwd: resolve('/project', 'services') });
   });
 
   it('retains native cwd references and respects server-local environment', () => {

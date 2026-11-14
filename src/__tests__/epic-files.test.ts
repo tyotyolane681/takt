@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { constants as bufferConstants } from 'node:buffer';
+import { basename, join } from 'node:path';
 import { DaemonEpicFiles } from '../infra/daemon/epicFiles.js';
 import { epicRecord, secondGoalId, verificationRunId } from './helpers/epic-fixtures.js';
 
@@ -27,7 +28,7 @@ describe('Daemon Epic file reads', () => {
     const files = new DaemonEpicFiles('/config');
     expect(await files.get(epic.workspaceId, epic.id)).toEqual(epic);
     expect(await collect(files, epic.workspaceId)).toEqual([epic]);
-    expect(doubles.read).toHaveBeenCalledWith(`/config/workspaces/${epic.workspaceId}/epics/${epic.id}/epic.json`, bufferConstants.MAX_LENGTH);
+    expect(doubles.read).toHaveBeenCalledWith(join('/config', 'workspaces', epic.workspaceId, 'epics', epic.id, 'epic.json'), bufferConstants.MAX_LENGTH);
   });
   it('rejects wrong owners, missing records, invalid IDs and symlink ancestors', async () => {
     const files = new DaemonEpicFiles('/config');
@@ -52,7 +53,7 @@ describe('Daemon Epic file reads', () => {
   it('allows an absent Epic directory but never hides a missing saved record', async () => {
     const files = new DaemonEpicFiles('/config');
     doubles.lstat.mockImplementation(async (path: string) => {
-      if (path.endsWith('/epics')) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      if (basename(path) === 'epics') throw Object.assign(new Error('missing'), { code: 'ENOENT' });
       return stat;
     });
     expect(await collect(files, epic.workspaceId)).toEqual([]);

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 
 const mocks = vi.hoisted(() => ({ git: vi.fn(), diff: vi.fn(), agent: vi.fn() }));
 vi.mock('node:child_process', () => ({ execFile: mocks.diff }));
@@ -28,7 +29,7 @@ describe('Fork threat check', () => {
     expect(await checkForkThreats(options)).toMatchObject({ passed: false, comment: expect.stringContaining(key) });
     expect(mocks.diff).not.toHaveBeenCalled();
     expect(mocks.agent).not.toHaveBeenCalled();
-    expect(mocks.git.mock.calls[0]?.[1]).toEqual(['config', '--file', '/clone/.git/config', '--no-includes', '--null', '--name-only', '--list']);
+    expect(mocks.git.mock.calls[0]?.[1]).toEqual(['config', '--file', join('/clone', '.git', 'config'), '--no-includes', '--null', '--name-only', '--list']);
   });
 
   it.each(['CLAUDE.md', 'nested/AGENTS.md', '.claude/settings.json', '.github/workflows/test.yml', '.mcp.json'])('危険な定義%sの変更を検出する', async (file) => {

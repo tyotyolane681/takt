@@ -13,6 +13,12 @@ vi.mock('node:child_process', () => ({
   spawn: mockSpawn,
 }));
 
+// The Windows spawn path uses cross-spawn's CommonJS child_process import.
+// Keep it on the same stub so these tests never launch a real CLI.
+vi.mock('cross-spawn', () => ({
+  default: (...args: unknown[]) => mockSpawn(...args),
+}));
+
 import { callCursor, callCursorCustom } from '../infra/cursor/client.js';
 import { formatTaskStateReferenceMarker } from '../shared/task-state-reference.js';
 

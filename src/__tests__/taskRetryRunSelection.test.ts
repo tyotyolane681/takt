@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { basename, join } from 'node:path';
 import type { RunMeta } from '../core/workflow/run/run-meta.js';
 import type { WorkflowResumePoint } from '../core/models/index.js';
 import type { TaskListItem } from '../infra/task/index.js';
@@ -11,7 +12,7 @@ const { metadata, reportDirs, readMeta, listRuns, checkPath, statPath } = vi.hoi
     readMeta: vi.fn((_cwd: string, slug: string, _warning?: (message: string) => void) => metadata.get(slug) ?? null),
     listRuns: vi.fn(() => [...metadata.keys()].map((name) => ({ name, isDirectory: () => true }))),
     checkPath: vi.fn((_path: string, _directory: boolean) => undefined),
-    statPath: vi.fn((path: string) => path.endsWith('/runs') || reportDirs.has(path) ? { isDirectory: () => true } : undefined),
+    statPath: vi.fn((path: string) => basename(path) === 'runs' || reportDirs.has(path) ? { isDirectory: () => true } : undefined),
   };
 });
 
@@ -42,7 +43,7 @@ function run(slug: string, startTime: string, overrides: Partial<RunMeta> = {}):
     ...overrides,
   };
   metadata.set(slug, meta);
-  reportDirs.add(`${cwd}/${meta.reportDirectory}`);
+  reportDirs.add(join(cwd, meta.reportDirectory));
   return meta;
 }
 
@@ -144,7 +145,7 @@ describe('resolveTaskRetryRunSelection', () => {
     run('z-oldest', '2026-10-28', { resumePoint: point('review') });
     const selected = run('a-newest', '2026-10-29', { resumePoint: point() });
     const unavailable = run('without-reports', '2026-10-30', { resumePoint: point('review') });
-    reportDirs.delete(`${cwd}/${unavailable.reportDirectory}`);
+    reportDirs.delete(join(cwd, unavailable.reportDirectory));
 
     const result = resolveTaskRetryRunSelection(task, cwd);
 
@@ -194,7 +195,7 @@ describe('resolveTaskRetryRunSelection', () => {
 
   it.each([false, true])('skips a discovered head without reports when no run slug was saved and an older source exists=%s', (hasOlderSource) => {
     const head = run('head', '2026-11-02', { resumePoint: point('review'), currentStep: 'review' });
-    reportDirs.delete(`${cwd}/${head.reportDirectory}`);
+    reportDirs.delete(join(cwd, head.reportDirectory));
     const older = hasOlderSource ? run('older', '2026-11-01', { resumePoint: point() }) : null;
 
     const result = resolveTaskRetryRunSelection({ ...task, runSlug: undefined }, cwd);
@@ -220,7 +221,7 @@ describe('resolveTaskRetryRunSelection', () => {
   it.each([false, true])('does not transfer an unowned task checkpoint to an older run with its own checkpoint=%s', (hasOlderPoint) => {
     const saved = point('review');
     const head = run('head', '2026-11-02', { resumePoint: saved, currentStep: 'review' });
-    reportDirs.delete(`${cwd}/${head.reportDirectory}`);
+    reportDirs.delete(join(cwd, head.reportDirectory));
     const olderPoint = hasOlderPoint ? point('implement') : undefined;
     const older = run('older', '2026-11-01', { resumePoint: olderPoint });
 

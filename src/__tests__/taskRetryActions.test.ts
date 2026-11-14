@@ -1,5 +1,6 @@
 vi.mock('../features/tasks/execute/providerPreflight.js', () => ({ checkTaskNameProvider: vi.fn(async () => undefined), checkQueuedTaskProviders: vi.fn(async () => undefined), terminalProviderConfirmation: vi.fn(() => undefined) }));
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { join } from 'node:path';
 import { attachWorkflowSourcePath, attachWorkflowTrustInfo } from '../infra/config/loaders/workflowSourceMetadata.js';
 import type { PersistedTaskOrderRevision } from '../features/tasks/orderRevision.js';
 import { withAttachmentCleanup } from './testUtils/attachmentTestHelpers.js';
@@ -2196,7 +2197,7 @@ describe('retryFailedTask', () => {
 
     await retryFailedTask(task, '/project');
 
-    expect(mockListRuns).toHaveBeenCalledWith('/project/.takt/worktrees/my-task/.takt/runs', { withFileTypes: true });
+    expect(mockListRuns).toHaveBeenCalledWith(join('/project', '.takt', 'worktrees', 'my-task', '.takt', 'runs'), { withFileTypes: true });
   });
 
   it('should load retry workflow metadata from the existing worktree lookup root', async () => {

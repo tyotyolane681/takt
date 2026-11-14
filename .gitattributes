@@ -1,0 +1,11 @@
+# Keep line endings LF on every platform. windows-latest checkouts default to
+# core.autocrlf=true, which would turn runtime preset scripts into CRLF.
+* text=auto eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.ts text eol=lf
+*.mjs text eol=lf
+bin/takt text eol=lf

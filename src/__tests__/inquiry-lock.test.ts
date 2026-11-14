@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 import { withInquiryLock } from '../infra/goals/inquiry-lock.js';
 
 const mocks = vi.hoisted(() => ({ mkdir: vi.fn(), realpath: vi.fn(), exclusive: vi.fn() }));
@@ -11,5 +12,5 @@ it('uses the canonical configuration directory for the exclusion boundary', asyn
   mocks.exclusive.mockImplementation(async (_path: string, action: () => Promise<string>) => action());
   await expect(withInquiryLock('/alias', async () => 'saved')).resolves.toBe('saved');
   expect(mocks.realpath).toHaveBeenCalledWith('/alias');
-  expect(mocks.exclusive).toHaveBeenCalledWith('/canonical/inquiries.lock', expect.any(Function), { timeoutMs: 60_000 });
+  expect(mocks.exclusive).toHaveBeenCalledWith(join('/canonical', 'inquiries.lock'), expect.any(Function), { timeoutMs: 60_000 });
 });

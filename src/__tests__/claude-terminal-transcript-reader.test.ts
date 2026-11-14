@@ -25,9 +25,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 async function withTemporaryClaudeHome<T>(run: (projectDir: string) => Promise<T>): Promise<T> {
   const originalHome = process.env.HOME;
+  // os.homedir() reads USERPROFILE on Windows and HOME elsewhere.
+  const originalUserProfile = process.env.USERPROFILE;
   const homeDir = await mkdtemp(join(tmpdir(), 'takt-claude-terminal-home-'));
   const projectDir = await mkdtemp(join(tmpdir(), 'takt-claude-terminal-project-'));
   process.env.HOME = homeDir;
+  process.env.USERPROFILE = homeDir;
 
   try {
     return await run(projectDir);
@@ -36,6 +39,11 @@ async function withTemporaryClaudeHome<T>(run: (projectDir: string) => Promise<T
       delete process.env.HOME;
     } else {
       process.env.HOME = originalHome;
+    }
+    if (originalUserProfile === undefined) {
+      delete process.env.USERPROFILE;
+    } else {
+      process.env.USERPROFILE = originalUserProfile;
     }
     await rm(homeDir, { recursive: true, force: true });
     await rm(projectDir, { recursive: true, force: true });

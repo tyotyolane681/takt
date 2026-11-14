@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const injectedRootAlias = vi.hoisted(() => ({
@@ -54,11 +54,13 @@ describe('private artifact path identity', () => {
     symlinkSync(targetRoot, aliasFixture, 'dir');
     symlinkSync(outsideDirectory, join(targetRoot, 'linked'), 'dir');
 
-    injectedRootAlias.path = '/takt-private-root-alias';
+    // The alias lives directly under the filesystem root of the current drive (`/` on POSIX, `X:\\` on Windows).
+    const aliasRoot = join(parse(resolve('/')).root, 'takt-private-root-alias');
+    injectedRootAlias.path = aliasRoot;
     injectedRootAlias.fixturePath = aliasFixture;
     injectedRootAlias.targetPath = targetRoot;
 
-    expect(() => assertSafePath('/takt-private-root-alias/safe', true)).not.toThrow();
-    expect(() => assertSafePath('/takt-private-root-alias/linked', true)).toThrow(/symlink/);
+    expect(() => assertSafePath(join(aliasRoot, 'safe'), true)).not.toThrow();
+    expect(() => assertSafePath(join(aliasRoot, 'linked'), true)).toThrow(/symlink/);
   });
 });

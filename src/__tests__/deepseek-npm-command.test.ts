@@ -1,4 +1,4 @@
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fsState = vi.hoisted(() => ({
@@ -55,7 +55,7 @@ vi.mock('node:fs/promises', () => {
       if (fsState.links.has(from)) {
         fsState.links.set(to, fsState.links.get(from)!);
         fsState.links.delete(from);
-        if (to.endsWith('/.sdk-previous')) fsState.abortAfterBackup?.abort();
+        if (basename(to) === '.sdk-previous') fsState.abortAfterBackup?.abort();
         return;
       }
       if (fsState.files.has(from)) {
@@ -100,7 +100,7 @@ async function generationModule(): Promise<ManagedGenerationModule> {
 }
 
 describe('managed generation publication on Windows', () => {
-  const managedRoot = '/test/managed';
+  const managedRoot = resolve('/test/managed');
   const oldDirectory = join(managedRoot, 'sdk-old');
   const nextDirectory = join(managedRoot, 'sdk-next');
   const options = { platform: 'win32' } as const;
@@ -147,7 +147,7 @@ describe('managed generation publication on Windows', () => {
   it('rejects publication outside the managed root without changing the current generation', async () => {
     const generation = await generationModule();
     await generation.publishManagedGeneration(managedRoot, oldDirectory, options);
-    const outside = '/test/unmanaged/sdk';
+    const outside = resolve('/test/unmanaged/sdk');
     fsState.directories.add(outside);
     await expect(generation.publishManagedGeneration(managedRoot, outside, options)).rejects.toThrow();
     expect(await generation.resolveManagedGeneration(managedRoot, options)).toBe(oldDirectory);
@@ -192,6 +192,7 @@ describe('managed DeepSeek npm command resolution', () => {
   });
 
   it('uses the POSIX Node prefix npm CLI before PATH', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
     const bundled = join(root, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
     const pathDir = join(root, 'path');
     fsState.files.add(bundled);
@@ -209,6 +210,7 @@ describe('managed DeepSeek npm command resolution', () => {
   });
 
   it('falls back to PATH and reports when npm is absent', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
     const pathDir = join(root, 'path');
     fsState.files.add(join(pathDir, 'npm'));
     await expect(resolveManagedNpmCommand({ nodePath, path: pathDir }))

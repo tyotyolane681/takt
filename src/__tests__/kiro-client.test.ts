@@ -10,6 +10,12 @@ vi.mock('node:child_process', () => ({
   spawn: mockSpawn,
 }));
 
+// The Windows spawn path uses cross-spawn's CommonJS child_process import.
+// Keep it on the same stub so these tests never launch a real CLI.
+vi.mock('cross-spawn', () => ({
+  default: (...args: unknown[]) => mockSpawn(...args),
+}));
+
 vi.mock('../shared/utils/index.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   createLogger: vi.fn(() => ({
@@ -72,7 +78,8 @@ const restoredEnvKeys = [
   'no_proxy',
 ] as const;
 
-const kiroNetworkEnvCases: Array<[typeof restoredEnvKeys[number], string]> = [
+// Windows environment variable names are case-insensitive, so lowercase proxy names alias the uppercase ones there.
+const kiroAllNetworkEnvCases: Array<[typeof restoredEnvKeys[number], string]> = [
   ['ALL_PROXY', 'http://all-proxy.example'],
   ['HTTP_PROXY', 'http://http-proxy.example'],
   ['HTTPS_PROXY', 'http://https-proxy.example'],
@@ -85,6 +92,10 @@ const kiroNetworkEnvCases: Array<[typeof restoredEnvKeys[number], string]> = [
   ['https_proxy', 'http://lower-https-proxy.example'],
   ['no_proxy', 'localhost,.internal'],
 ];
+
+const kiroNetworkEnvCases = process.platform === 'win32'
+  ? kiroAllNetworkEnvCases.filter(([key]) => key === key.toUpperCase())
+  : kiroAllNetworkEnvCases;
 
 const kiroObservabilityEnvCases: Array<[typeof restoredEnvKeys[number], string]> = [
   ['TAKT_OBSERVABILITY', '{"enabled":true,"monitor":true,"session_log_exporter":true,"usage_events_phase":true}'],

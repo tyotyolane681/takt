@@ -99,7 +99,7 @@ vi.mock('../../features/repertoire/file-filter.js', () => ({
   STEP_FRAGMENT_EXTENSIONS: ['.yaml', '.yml'],
   isStepFragmentExtension: (filename: string) => ['.yaml', '.yml'].includes(extname(filename)),
   collectCopyTargets: vi.fn(() => [{
-    absolutePath: `${secureTempDir}/extract/facets/personas/coder.md`,
+    absolutePath: join(secureTempDir, 'extract', 'facets', 'personas', 'coder.md'),
     relativePath: 'facets/personas/coder.md',
   }]),
 }));
@@ -172,10 +172,11 @@ describe('repertoireAddCommand temporary directory handling', () => {
     expect(mockResolveRepertoireConfigPath).toHaveBeenCalledWith(join(secureTempDir, 'extract'));
   });
 
-  it('should create a missing TMPDIR before creating import artifacts', async () => {
-    const originalTmpDir = process.env.TMPDIR;
+  it('should create a missing temporary directory before creating import artifacts', async () => {
+    const tmpEnvNames = ['TMPDIR', 'TEMP', 'TMP'] as const;
+    const originalEnv = tmpEnvNames.map((name) => [name, process.env[name]] as const);
     const missingTmpDir = join(tmpdir(), 'takt-repertoire-missing-tmp');
-    process.env.TMPDIR = missingTmpDir;
+    for (const name of tmpEnvNames) process.env[name] = missingTmpDir;
 
     try {
       await repertoireAddCommand('github:owner/repo@main');
@@ -183,10 +184,12 @@ describe('repertoireAddCommand temporary directory handling', () => {
       expect(mockMkdirSync).toHaveBeenCalledWith(missingTmpDir, { recursive: true });
       expect(mockMkdtempSync).toHaveBeenCalledWith(join(missingTmpDir, 'takt-import-'));
     } finally {
-      if (originalTmpDir === undefined) {
-        delete process.env.TMPDIR;
-      } else {
-        process.env.TMPDIR = originalTmpDir;
+      for (const [name, value] of originalEnv) {
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
       }
     }
   });
@@ -199,8 +202,8 @@ describe('repertoireAddCommand temporary directory handling', () => {
   });
 
   it('should pass provider-options package YAMLs to edit workflow detection', async () => {
-    const workflowPath = `${secureTempDir}/extract/workflows/workflow.yaml`;
-    const providerOptionsPath = `${secureTempDir}/extract/provider-options/edit.yaml`;
+    const workflowPath = join(secureTempDir, 'extract', 'workflows', 'workflow.yaml');
+    const providerOptionsPath = join(secureTempDir, 'extract', 'provider-options', 'edit.yaml');
     const workflowYaml = 'steps:\n  - name: run\n    provider_options:\n      extends: edit\n';
     const providerOptionsYaml = 'claude:\n  allowed_tools: [Bash]\n';
 
@@ -252,7 +255,7 @@ describe('repertoireAddCommand temporary directory handling', () => {
         context: {
           projectDir: process.cwd(),
           lang: 'ja',
-          workflowDir: '/home/user/.takt/repertoire/@owner/repo/workflows',
+          workflowDir: join('/home/user/.takt/repertoire/@owner/repo', 'workflows'),
           repertoireDir: '/home/user/.takt/repertoire',
         },
       },
@@ -260,7 +263,7 @@ describe('repertoireAddCommand temporary directory handling', () => {
   });
 
   it('should summarize only resolvable root-level step fragments', async () => {
-    const stepPath = `${secureTempDir}/extract/steps/review.yaml`;
+    const stepPath = join(secureTempDir, 'extract', 'steps', 'review.yaml');
     mockCollectCopyTargets.mockReturnValue([
       { absolutePath: stepPath, relativePath: 'steps/review.yaml' },
     ]);
@@ -272,7 +275,7 @@ describe('repertoireAddCommand temporary directory handling', () => {
 
   it('should sanitize a step fragment name only at the installation summary boundary', async () => {
     const unsafeName = 'review\x1b[31munsafe\x1b[0m';
-    const stepPath = `${secureTempDir}/extract/steps/${unsafeName}.yaml`;
+    const stepPath = join(secureTempDir, 'extract', 'steps', `${unsafeName}.yaml`);
     mockCollectCopyTargets.mockReturnValue([
       { absolutePath: stepPath, relativePath: `steps/${unsafeName}.yaml` },
     ]);
@@ -303,14 +306,14 @@ describe('repertoireAddCommand temporary directory handling', () => {
       `/repos/owner/repo/tarball/${resolvedRef}`,
     ], expect.any(Object));
     expect(mockWriteFileSync).toHaveBeenCalledWith(
-      '/home/user/.takt/repertoire/@owner/repo/.takt-repertoire-lock.yaml',
+      join('/home/user/.takt/repertoire/@owner/repo', '.takt-repertoire-lock.yaml'),
       expect.stringContaining('ref: "main\\e[31munsafe\\e[0m"'),
     );
   });
 
   it('should reject an install before confirmation when a copied workflow references an excluded local fragment', async () => {
-    const workflowPath = `${secureTempDir}/extract/workflows/review.yaml`;
-    const excludedFragmentPath = `${secureTempDir}/extract/steps/excluded.yaml`;
+    const workflowPath = join(secureTempDir, 'extract', 'workflows', 'review.yaml');
+    const excludedFragmentPath = join(secureTempDir, 'extract', 'steps', 'excluded.yaml');
     mockCollectCopyTargets.mockReturnValue([
       { absolutePath: workflowPath, relativePath: 'workflows/review.yaml' },
     ]);
@@ -329,7 +332,7 @@ describe('repertoireAddCommand temporary directory handling', () => {
   });
 
   it('should not prompt or install when reading a required workflow fails', async () => {
-    const workflowPath = `${secureTempDir}/extract/workflows/review.yaml`;
+    const workflowPath = join(secureTempDir, 'extract', 'workflows', 'review.yaml');
     const sourceError = new Error('Failed to read workflow source');
     mockCollectCopyTargets.mockReturnValue([
       { absolutePath: workflowPath, relativePath: 'workflows/review.yaml' },
@@ -352,7 +355,7 @@ describe('repertoireAddCommand temporary directory handling', () => {
   });
 
   it('should not prompt or install when reading a required step fragment fails', async () => {
-    const stepPath = `${secureTempDir}/extract/steps/review.yaml`;
+    const stepPath = join(secureTempDir, 'extract', 'steps', 'review.yaml');
     const sourceError = new Error('Failed to read step fragment source');
     mockCollectCopyTargets.mockReturnValue([
       { absolutePath: stepPath, relativePath: 'steps/review.yaml' },

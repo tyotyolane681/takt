@@ -1,4 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 
 const { read, write, rename, remove, mkdir } = vi.hoisted(() => ({
   read: vi.fn(), write: vi.fn(), rename: vi.fn(), remove: vi.fn(), mkdir: vi.fn(),
@@ -14,7 +15,7 @@ describe('update notification cache', () => {
   afterEach(() => vi.unstubAllEnvs());
 
   it('uses the existing configstore location', () => {
-    expect(updateCachePath()).toBe('/isolated/config/configstore/update-notifier-takt.json');
+    expect(updateCachePath()).toBe(join('/isolated/config', 'configstore', 'update-notifier-takt.json'));
   });
 
   it.each(['null', '[]', '{', '42'])('ignores an invalid optional cache: %s', (raw) => {
