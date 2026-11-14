@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runAgent } from '../agents/runner.js';
 import {
@@ -203,7 +204,7 @@ describe('judge runAgent provider/model resolution (#556)', () => {
       }
       expect(vi.mocked(runAgent).mock.calls[1]?.[2]).toMatchObject({
         language: 'ja',
-        personaPath: expect.stringContaining('/ja/facets/personas/conductor.md'),
+        personaPath: expect.stringContaining(join('ja', 'facets', 'personas', 'conductor.md')),
       });
     });
 

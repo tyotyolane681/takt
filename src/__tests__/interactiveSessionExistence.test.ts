@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { AcquiredOpenCodeClient } from '../infra/opencode/server-pool.js';
 
@@ -18,7 +19,7 @@ beforeEach(() => {
 it('checks the project Claude session file and distinguishes absence from I/O failure', async () => {
   doubles.stat.mockReturnValueOnce({ isFile: () => true }).mockImplementationOnce(() => { throw Object.assign(new Error(), { code: 'ENOENT' }); }).mockImplementationOnce(() => { throw Object.assign(new Error(), { code: 'EACCES' }); });
   expect(await interactiveSessionExists('/project', 'claude', 'session')).toBe(true);
-  expect(doubles.stat).toHaveBeenCalledWith('/claude/project/session.jsonl');
+  expect(doubles.stat).toHaveBeenCalledWith(join('/claude/project', 'session.jsonl'));
   expect(await interactiveSessionExists('/project', 'claude', 'missing')).toBe(false);
   expect(await interactiveSessionExists('/project', 'claude', 'unreadable')).toBeUndefined();
 });

@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createConversationRuntime } from '../features/manager/conversationRuntime.js';
 import { deferred } from './helpers/daemon-turn.js';
@@ -60,7 +61,7 @@ it.each([true, false])('passes resolved AI permission review to preflight (%s)',
 
 it.each([
   { repositories: ['/first', '/second'], cwd: '/first' },
-  { repositories: [], cwd: '/config/workspaces/workspace-1' },
+  { repositories: [], cwd: join('/config', 'workspaces', 'workspace-1') },
 ])('uses the workspace manager cwd for configuration: %j', async ({ repositories, cwd }) => {
   await runtime.resolve({ kind: 'workspace', workspaceId: 'workspace-1', name: 'workspace', repositoryDirectories: repositories }, signal);
   expect(doubles.plan).toHaveBeenCalledWith(cwd, { repositoryDirectories: repositories });

@@ -10,6 +10,12 @@ vi.mock('node:child_process', () => ({
   spawn: mockSpawn,
 }));
 
+// The Windows spawn path uses cross-spawn's CommonJS child_process import.
+// Keep it on the same stub so these tests never launch a real CLI.
+vi.mock('cross-spawn', () => ({
+  default: (...args: unknown[]) => mockSpawn(...args),
+}));
+
 vi.mock('../shared/utils/index.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   createLogger: vi.fn(() => ({
