@@ -160,6 +160,24 @@ Optional:
 
 > **OAuth usage:** Whether OAuth is permitted varies by provider and use case. Check each provider's terms of service before using TAKT.
 
+## Windows Notes
+
+TAKT's CI builds and runs the unit gate on `windows-latest`, and runs one mock-provider workflow end to end there. Native Windows has not been verified by hand on a physical machine.
+
+**Prerequisites**
+
+- Node.js `>=22.22.0`, Git `>=2.38`, and npm, the same as on other platforms.
+- Provider CLIs are resolved with `PATH` and `PATHEXT`, so both `.exe` and `.cmd` shims (for example the ones npm installs) are found. Arguments are passed without going through a shell.
+- The daemon listens on a named pipe (`\\.\pipe\takt-manager-<hash>`), and stopping a command or task terminates its process tree with `taskkill /T /F`.
+- Worktree execution uses `git clone --reference --dissociate` with Windows path separators.
+- `.gitattributes` pins line endings to LF so that runtime preset scripts (`*.sh`) are not converted to CRLF by `core.autocrlf` on checkout.
+
+**Limitations**
+
+- `claude-terminal` requires `tmux` and `deepseek-harness` supports only Linux and macOS (see [Requirements](#requirements)); neither is verified on native Windows.
+- Windows CI covers build, CLI startup (`--version`, `--help`), the unit tests, and one mock workflow. Real provider APIs and the heavy integration and E2E suites are not run on Windows.
+- Deep paths: Git on Windows may fail on very long paths unless long path support is enabled (`git config --global core.longpaths true` and the Windows long path setting). The behaviour of worktree execution at long paths on a real Windows machine is not verified.
+
 ## Quick Start
 
 ### Install

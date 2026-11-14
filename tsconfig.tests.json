@@ -803,6 +803,7 @@
     "src/__tests__/web-ui-ui-state.test.ts",
     "src/__tests__/web-ui.integration.test.ts",
     "src/__tests__/windows-long-cwd-helper-spawn.test.ts",
+    "src/__tests__/windows-support-contract.test.ts",
     "src/__tests__/work-requirement-estimator-claude.test.ts",
     "src/__tests__/workerPool.test.ts",
     "src/__tests__/workflow-call-abort-resume.test.ts",

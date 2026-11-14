@@ -160,6 +160,24 @@ TAKT の実行には Node.js `>=22.22.0` と Git `>=2.38` が必要です（ゴ�
 
 > **OAuth の利用について:** OAuth が利用可能かどうかはプロバイダーや用途によって異なります。TAKT を利用する際には各プロバイダーの利用規約をご確認ください。
 
+## Windows に関する注意
+
+TAKT の CI は `windows-latest` で build と unit テストを実行し、mock provider の workflow を 1 本最後まで実行します。実機の Windows での手動確認は行っていません。
+
+**前提**
+
+- Node.js `>=22.22.0`、Git `>=2.38`、npm。他のプラットフォームと同じです。
+- プロバイダー CLI は `PATH` と `PATHEXT` で解決するため、`.exe` と `.cmd`（npm が作る shim など）のどちらも見つかります。引数はシェルを経由せずに渡します。
+- daemon は名前付きパイプ（`\\.\pipe\takt-manager-<hash>`）で待ち受けます。コマンドやタスクの停止は `taskkill /T /F` でプロセスツリーごと終了します。
+- worktree 実行は、Windows のパス区切りで `git clone --reference --dissociate` を使います。
+- `.gitattributes` で行末を LF に固定しています。`core.autocrlf` によって実行時プリセットスクリプト（`*.sh`）が CRLF に変換されるのを防ぐためです。
+
+**制限事項**
+
+- `claude-terminal` は `tmux` を必要とし、`deepseek-harness` は Linux と macOS のみ対応です（[必要なもの](#必要なもの)参照）。どちらもネイティブ Windows では未確認です。
+- Windows の CI が確認する範囲は、build、CLI 起動（`--version`、`--help`）、unit テスト、mock workflow 1 本です。実プロバイダー API と、重い統合テスト・E2E は Windows では実行しません。
+- 深いパス: Windows の Git は、長いパスのサポートを有効にしないと極端に長いパスで失敗することがあります（`git config --global core.longpaths true` と Windows の長いパス設定）。実機の Windows で長いパスの worktree 実行がどう動くかは未確認です。
+
 ## クイックスタート
 
 ### インストール
