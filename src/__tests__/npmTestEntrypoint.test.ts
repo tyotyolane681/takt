@@ -5,7 +5,6 @@ import {
   resolveLocalUnitShardCount,
   runNpmTest,
   selectNpmTestRuns,
-  shouldRunUnitShardsSequentially,
 } from '../../scripts/run-npm-test.mjs';
 import {
   BIRPC_REMEASURE_ON_CI_ENV,
@@ -112,7 +111,7 @@ describe('npm test execution', () => {
       return { code: 0, signal: null, output: '' };
     });
 
-    const code = await runNpmTest([], run, FIXED_UNIT_SHARD_COUNT, false);
+    const code = await runNpmTest([], run, FIXED_UNIT_SHARD_COUNT);
 
     expect(events.slice(0, 8)).toEqual([
       'start:--shard=1/8',
@@ -136,36 +135,6 @@ describe('npm test execution', () => {
     ]);
     expect(run).toHaveBeenCalledTimes(8);
     expect(code).toBe(0);
-  });
-
-  it('should run unit shards one at a time when sequential execution is requested', async () => {
-    const events: string[] = [];
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const run = vi.fn(async (npmArgs: readonly string[]) => {
-      const shard = npmArgs[4]!;
-      events.push(`start:${shard}`);
-      await Promise.resolve();
-      events.push(`finish:${shard}`);
-      return { code: 0, signal: null, output: '' };
-    });
-
-    const code = await runNpmTest([], run, 3, true);
-
-    expect(events).toEqual([
-      'start:--shard=1/3',
-      'finish:--shard=1/3',
-      'start:--shard=2/3',
-      'finish:--shard=2/3',
-      'start:--shard=3/3',
-      'finish:--shard=3/3',
-    ]);
-    expect(code).toBe(0);
-  });
-
-  it('should run unit shards sequentially only on win32', () => {
-    expect(shouldRunUnitShardsSequentially('win32')).toBe(true);
-    expect(shouldRunUnitShardsSequentially('darwin')).toBe(false);
-    expect(shouldRunUnitShardsSequentially('linux')).toBe(false);
   });
 
   it('should continue all unit shards and return the first failure code', async () => {
@@ -294,7 +263,7 @@ describe('npm test execution', () => {
       };
     });
 
-    const execution = executeNpmTestRuns(runs, run, false);
+    const execution = executeNpmTestRuns(runs, run);
     await vi.waitFor(() => expect(events).toHaveLength(3));
     expect(events).toEqual([
       'start:test:unit:parallel',

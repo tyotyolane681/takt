@@ -253,7 +253,17 @@ jobs:
         run: node bin/takt --version
       - name: Verify bin/takt --help on Windows
         run: node bin/takt --help
-      - run: npm test
+      # `npm test` (scripts/run-npm-test.mjs -> scripts/teed-command.mjs) is not used on Windows: in CI it
+      # once exited 1 about 8 minutes in, with no `[takt] npm ... failed` line, even with the unit shards run
+      # one at a time. The cause is NOT confirmed. Running the vitest shards directly (as the diagnostic run
+      # did, where they passed) avoids that wrapper layer. type-contracts and the test type-check that
+      # `npm test` also runs are covered by the Linux/macOS jobs.
+      - name: Unit tests (shard 1/2)
+        timeout-minutes: 20
+        run: npx vitest run --config vitest.config.unit.parallel.ts --shard=1/2 --maxWorkers=1
+      - name: Unit tests (shard 2/2)
+        timeout-minutes: 20
+        run: npx vitest run --config vitest.config.unit.parallel.ts --shard=2/2 --maxWorkers=1
       - name: Run a mock-provider workflow to completion on Windows
         env:
           TAKT_E2E_PROVIDER: mock
