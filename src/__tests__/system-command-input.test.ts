@@ -44,7 +44,7 @@ describe('command system input adapter', () => {
     expect(await resolveCommandInput(input, options, state())).toEqual({
       exit_code: 0, timed_out: false, stdout: result.stdout, stderr: '',
     });
-    expect(doubles.file).toHaveBeenCalledWith(expect.stringMatching(/^\/run\/context\/system-commands\/.+\/response.txt$/), '');
+    expect(doubles.file).toHaveBeenCalledWith(expect.stringMatching(/^[\\/]run[\\/]context[\\/]system-commands[\\/].+[\\/]response\.txt$/), '');
     expect(doubles.run).toHaveBeenCalledWith(expect.objectContaining({
       command: input.command, cwd: '/task', timeoutMs: 1000,
     }));

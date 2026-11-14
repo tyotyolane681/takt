@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const doubles = vi.hoisted(() => ({ text: vi.fn(), run: vi.fn(), sha: vi.fn(), included: vi.fn(), create: vi.fn(), remove: vi.fn(), warn: vi.fn() }));
 vi.mock('../infra/goals/git-command.js', () => ({
@@ -6,6 +7,7 @@ vi.mock('../infra/goals/git-command.js', () => ({
 vi.mock('node:fs/promises', () => ({ mkdtemp: doubles.create, rm: doubles.remove }));
 vi.mock('../shared/utils/debug.js', () => ({ createLogger: () => ({ warn: doubles.warn }) }));
 import { checkedOutGoalWorktrees, mergeGoalBranch } from '../infra/goals/merge-git.js';
+const clonePath = join('/temporary', 'repository');
 const oldSha = 'a'.repeat(40);
 const source = 'b'.repeat(40);
 const merged = 'c'.repeat(40);
@@ -41,8 +43,8 @@ describe('isolated goal Git merge', () => {
   });
   it('publishes objects, rechecks worktrees and conditionally updates the original reference', async () => {
     expect(await mergeGoalBranch('/project', source, 'main', undefined)).toEqual({ status: 'merged', sha: merged });
-    expect(doubles.text).toHaveBeenCalledWith('/project', ['clone', '--shared', '--no-checkout', '--', '/project', '/temporary/repository'], undefined);
-    expect(doubles.run).toHaveBeenCalledWith('/temporary/repository', ['merge', '--no-ff', '--no-edit', source], 4096, undefined, [0, 1]);
+    expect(doubles.text).toHaveBeenCalledWith('/project', ['clone', '--shared', '--no-checkout', '--', '/project', clonePath], undefined);
+    expect(doubles.run).toHaveBeenCalledWith(clonePath, ['merge', '--no-ff', '--no-edit', source], 4096, undefined, [0, 1]);
     expect(doubles.text).toHaveBeenCalledWith('/project', ['update-ref', 'refs/heads/main', merged, oldSha], undefined);
     expect(doubles.run.mock.calls.filter(([, args]) => args[0] === 'worktree')).toHaveLength(2);
     expect(doubles.remove).toHaveBeenCalledOnce();
@@ -63,7 +65,7 @@ describe('isolated goal Git merge', () => {
       truncated: false, code: args[0] === 'merge' || args[0] === 'config' ? 1 : 0,
     }));
     expect(await mergeGoalBranch('/project', source, 'main', undefined)).toEqual({ status: 'conflict', conflicts: ['file\tname\n.txt'] });
-    expect(doubles.text).toHaveBeenCalledWith('/temporary/repository', ['merge', '--abort'], undefined);
+    expect(doubles.text).toHaveBeenCalledWith(clonePath, ['merge', '--abort'], undefined);
     expect(doubles.text.mock.calls.some(([, args]) => args[0] === 'update-ref')).toBe(false);
     expect(doubles.remove).toHaveBeenCalledOnce();
   });
@@ -112,7 +114,7 @@ describe('isolated goal Git merge', () => {
 
     expect(await mergeGoalBranch('/project', source, 'main', undefined))
       .toEqual({ status: 'conflict', conflicts: ['conflict.txt'] });
-    expect(doubles.text).toHaveBeenCalledWith('/temporary/repository', ['merge', '--abort'], undefined);
+    expect(doubles.text).toHaveBeenCalledWith(clonePath, ['merge', '--abort'], undefined);
     expect(doubles.text.mock.calls.some(([, args]) => args[0] === 'update-ref')).toBe(false);
     expect(doubles.warn).toHaveBeenCalledWith(expect.any(String), { path: '/temporary', error: String(cleanupError) });
   });

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Stats } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { PrivateDirectoryReadSnapshot } from '../shared/utils/private-file.js';
 
@@ -49,7 +49,7 @@ import {
   RESUME_ARTIFACTS_FILE_NAME,
 } from '../core/workflow/run/resume-report-snapshot.js';
 
-const cwd = '/snapshot-project';
+const cwd = resolve('/snapshot-project');
 const sourceReports = join(cwd, '.takt/runs/source-run/reports');
 const targetReports = join(cwd, '.takt/runs/target-run/reports');
 const options = { cwd, sourceRunSlug: 'source-run', targetRunSlug: 'target-run' };

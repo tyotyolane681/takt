@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import type { Stats } from 'node:fs';
 import type { GoalProjectionCacheEntry } from '../infra/goals/store.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -33,7 +34,7 @@ describe('GoalStore validation and publication', () => {
   it('validates and publishes a new complete record without creating a lock', async () => {
     expect(await new GoalStore('/project').create(goalRecord())).toEqual(goalRecord());
     expect(doubles.write).toHaveBeenCalledOnce();
-    expect(doubles.write.mock.calls[0]![0]).toBe(`/project/.takt/goals/${goalId}/goal.json`);
+    expect(doubles.write.mock.calls[0]![0]).toBe(join('/project', '.takt', 'goals', goalId, 'goal.json'));
     expect(JSON.parse(doubles.write.mock.calls[0]![1])).toEqual(goalRecord());
   });
   it('refuses an existing record without publishing', async () => {
