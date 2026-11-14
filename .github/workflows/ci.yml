@@ -254,6 +254,27 @@ jobs:
       - name: Verify bin/takt --help on Windows
         run: node bin/takt --help
       - run: npm test
+      # 暫定の診断ステップ: Windows の unit テストが出力途絶のまま失敗する原因を特定するため、
+      # shard を 1 つずつ実行して JSON と終了コードを残す。原因特定後にこの 3 ステップを削除し、npm test へ戻す。
+      - name: Run unit shard 1/2 (temporary diagnostic)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: |
+          npx vitest run --config vitest.config.unit.parallel.ts --shard=1/2 --maxWorkers=1 --reporter=default --reporter=hanging-process --reporter=json --outputFile.json=vitest-shard-1.json --logHeapUsage
+          $code = $LASTEXITCODE
+          "VITEST_SHARD_1_EXIT=$code" >> $env:GITHUB_ENV
+          exit $code
+      - name: Run unit shard 2/2 (temporary diagnostic)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: |
+          npx vitest run --config vitest.config.unit.parallel.ts --shard=2/2 --maxWorkers=1 --reporter=default --reporter=hanging-process --reporter=json --outputFile.json=vitest-shard-2.json --logHeapUsage
+          $code = $LASTEXITCODE
+          "VITEST_SHARD_2_EXIT=$code" >> $env:GITHUB_ENV
+          exit $code
+      - name: Summarize unit shard results (temporary diagnostic)
+        if: always()
+        run: node scripts/summarize-vitest-shards.mjs 1=vitest-shard-1.json 2=vitest-shard-2.json
       - name: Run a mock-provider workflow to completion on Windows
         env:
           TAKT_E2E_PROVIDER: mock
