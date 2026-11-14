@@ -1,4 +1,5 @@
 import { beforeEach, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 
 const doubles = vi.hoisted(() => ({ stat: vi.fn(), read: vi.fn(), unlink: vi.fn(), remove: vi.fn(), alive: vi.fn(), identity: vi.fn() }));
 vi.mock('node:fs', async (importOriginal) => ({
@@ -30,8 +31,8 @@ it.each(['dead', 'reused'])('recovers an execution owner only after proving it i
   doubles.alive.mockReturnValue(condition !== 'dead');
   doubles.identity.mockReturnValue({ startTime: 'linux-start-v3:550e8400-e29b-41d4-a716-446655440000:123451' });
   expect(getProjectExecutionOwner('/project')).toBeUndefined();
-  expect(doubles.unlink).toHaveBeenCalledExactlyOnceWith('/project/.takt/execution.lock/owner-550e8400-e29b-41d4-a716-446655440000.json');
-  expect(doubles.remove).toHaveBeenCalledExactlyOnceWith('/project/.takt/execution.lock');
+  expect(doubles.unlink).toHaveBeenCalledExactlyOnceWith(join('/project', '.takt', 'execution.lock', 'owner-550e8400-e29b-41d4-a716-446655440000.json'));
+  expect(doubles.remove).toHaveBeenCalledExactlyOnceWith(join('/project', '.takt', 'execution.lock'));
 });
 it('returns the same verified live owner and never removes its record', () => {
   doubles.identity.mockReturnValue(owner.processIdentity);

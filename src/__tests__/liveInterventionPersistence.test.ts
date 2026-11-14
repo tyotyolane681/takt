@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { buildRunPaths } from '../core/workflow/run/run-paths.js';
 import { persistDeliveredLiveInstructions } from '../features/tasks/execute/liveInterventionPersistence.js';
 import { resolveTaskSpecForExecution, restageTaskSpecForExecution, type ResolvedTaskSpec } from '../features/tasks/execute/taskSpecContext.js';
@@ -41,7 +42,7 @@ describe('persistDeliveredLiveInstructions', () => {
     expect(String(appended)).toContain(instructions[0]!.issuedAt);
     expect(String(appended)).toContain(instructions[0]!.content);
     expect(fs.closeSync).toHaveBeenCalledWith(123);
-    expect(resolveTaskSpecForExecution).toHaveBeenCalledWith('/project', '/clone', '.takt/tasks/task-a', 'run-a', paths);
+    expect(resolveTaskSpecForExecution).toHaveBeenCalledWith('/project', '/clone', path.join('.takt', 'tasks', 'task-a'), 'run-a', paths);
     expect(restageTaskSpecForExecution).toHaveBeenCalledWith(spec, paths);
   });
 
