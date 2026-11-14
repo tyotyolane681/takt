@@ -1,5 +1,8 @@
 vi.mock('../infra/managed-providers/loader.js', () => import('./helpers/managed-sdk.js'));
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { V2Event } from '@opencode/client';
 import { createV2Transport } from '../infra/opencode/v2-transport.js';
 import { v2EventTranslator } from '../infra/opencode/v2-events.js';
@@ -17,6 +20,28 @@ const prompt = {
   model: { providerID: 'probe', modelID: 'probe' }, parts: [{ type: 'text' as const, text: 'review' }],
   tools: { read: true, write: false, bash: false, task: false },
 };
+const temporaryDirectories: string[] = [];
+
+function createExternalContextDirectory() {
+  const root = mkdtempSync(join(tmpdir(), 'takt-opencode-v2-context-'));
+  temporaryDirectories.push(root);
+  const realRunDirectory = join(root, 'real-run');
+  const linkedRunDirectory = join(root, 'run-link');
+  const realContextDirectory = join(realRunDirectory, 'context');
+  mkdirSync(realContextDirectory, { recursive: true });
+  symlinkSync(realRunDirectory, linkedRunDirectory, 'dir');
+  return {
+    contextDirectory: join(linkedRunDirectory, 'context'),
+    canonicalContextDirectory: realpathSync(realContextDirectory),
+  };
+}
+
+afterEach(() => {
+  for (const directory of temporaryDirectories) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+  temporaryDirectories.length = 0;
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -83,6 +108,24 @@ describe('OpenCode v2 transport', () => {
     expect(transport.nativeStructuredOutput).toBe(false);
   });
 
+  it('allows the TAKT context directory while keeping other external paths denied', async () => {
+    const { contextDirectory, canonicalContextDirectory } = createExternalContextDirectory();
+    const transport = await createV2Transport('http://localhost', 'password');
+    await transport.session.promptAsync({
+      ...prompt,
+      externalDirectoryAllowlist: [contextDirectory],
+    });
+
+    const permissions = api.session.update.mock.calls[0]![0].permissions as Array<{
+      action: string; resource: string; effect: string;
+    }>;
+    expect(permissions.slice(-3)).toEqual([
+      { action: 'external_directory', resource: '*', effect: 'deny' },
+      { action: 'external_directory', resource: join(canonicalContextDirectory, '*'), effect: 'allow' },
+      { action: 'edit', resource: join(canonicalContextDirectory, '*'), effect: 'deny' },
+    ]);
+  });
+
   it('switches to the neutral read agent while carrying interpretation instructions and read-only tools', async () => {
     await (await createV2Transport('http://localhost', '')).session.promptAsync({
       ...prompt, agent: 'takt-read', system: 'Interpret verification results.',
@@ -126,6 +169,16 @@ describe('OpenCode v2 transport', () => {
     expect(api.session.prompt).toHaveBeenCalledOnce();
   });
 
+  it('adds a narrow external context rule to the v2 server configuration', () => {
+    const { contextDirectory, canonicalContextDirectory } = createExternalContextDirectory();
+    const config = buildV2ServerConfig(undefined, undefined, '/plugin', {}, false, [contextDirectory]);
+    expect(config.permissions).toEqual([
+      { action: 'external_directory', resource: '*', effect: 'deny' },
+      { action: 'external_directory', resource: join(canonicalContextDirectory, '*'), effect: 'allow' },
+      { action: 'edit', resource: join(canonicalContextDirectory, '*'), effect: 'deny' },
+    ]);
+  });
+
   it('waits for MCP catalog registration before exposing an allowed tool', async () => {
     api.rpc.call.mockResolvedValueOnce({ output: [] }).mockResolvedValue({ output: [{ id: 'probe_echo', namespace: 'probe' }] });
     await (await createV2Transport('http://localhost', '')).session.promptAsync({ ...prompt, tools: { probe_echo: true } });
@@ -142,6 +195,40 @@ describe('OpenCode v2 transport', () => {
     expect(api.session.update).toHaveBeenCalledWith(expect.objectContaining({ metadata: {
       preserved: 1, takt: { system: 'review persona', tools: { read: true, write: false, shell: false, subagent: false, probe_echo: true } },
     } }), undefined);
+  });
+
+  it.each([
+    { server: 'backlog__main', similar: 'backlog' },
+    { server: 'queue_', similar: 'queue' },
+  ])('waits for the registered tools of the approved server $server and enables only its namespace', async ({ server, similar }) => {
+    const approved = [{ id: `${server}_get_issue`, namespace: server }, { id: `${server}_add_issue`, namespace: server }];
+    const similarTool = { id: `${similar}_get_issue`, namespace: similar };
+    api.rpc.call.mockResolvedValueOnce({ output: [similarTool] }).mockResolvedValue({ output: [similarTool, ...approved] });
+    await (await createV2Transport('http://localhost', '')).session.promptAsync({ ...prompt, allowedMcpServers: [server] });
+    expect(api.rpc.call).toHaveBeenCalledTimes(2);
+    const update = api.session.update.mock.calls[0]![0] as { permissions: Array<{ action: string; effect: string }>; metadata: { takt: { tools: Record<string, boolean> } } };
+    expect(update.metadata.takt.tools).toMatchObject({ [approved[0]!.id]: true, [approved[1]!.id]: true });
+    expect(update.metadata.takt.tools[similarTool.id]).toBeUndefined();
+    const allowed = update.permissions.filter((rule) => rule.effect === 'allow').map((rule) => rule.action);
+    expect(allowed).toEqual(expect.arrayContaining(approved.map((tool) => tool.id)));
+    expect(allowed).not.toContain(similarTool.id);
+    expect(api.session.prompt).toHaveBeenCalledOnce();
+  });
+
+  it('keeps waiting while an approved server has not registered any tool', async () => {
+    vi.useFakeTimers();
+    try {
+      api.rpc.call.mockResolvedValue({ output: [{ id: 'backlog_get_issue', namespace: 'backlog' }] });
+      const sent = (await createV2Transport('http://localhost', '')).session.promptAsync({ ...prompt, allowedMcpServers: ['backlog__main'] });
+      const settled = sent.then(() => 'sent', (error: unknown) => String(error));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(api.session.prompt).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(settled).resolves.toMatch(/abort|timeout/i);
+      expect(api.session.prompt).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('refuses a session from a different directory', async () => {

@@ -58,6 +58,10 @@ loop_monitors:
       - fix-retry
     threshold: 4
     judge:
+      input_reports:
+        - from_step: fix
+          reports: [fix-report.md]
+          history: {previous: 2}
       persona: supervisor
       instruction: loop-monitor-reviewers-fix
       rules:
@@ -74,6 +78,13 @@ loop_monitors:
       - fix-verifier
     threshold: 4
     judge:
+      input_reports:
+        - from_step: fix-retry
+          reports: [fix-report.md]
+          history: {previous: 2}
+        - from_step: fix-verifier
+          reports: [fix-verification.md]
+          history: {previous: 2}
       persona: supervisor
       instruction: loop-monitor-reviewers-fix
       rules:
@@ -89,10 +100,18 @@ steps:
   - name: review-adjudication
     uses: peer-review-adjudication
     with:
-      review_policy_additions:
-        $param: plan_policy
+      review_policy_additions: []
       review_knowledge_additions:
         $param: fix_knowledge
+    # review は plan_policy に含まれるため、固定分との重複を避ける。
+    policy:
+      - process-deviation
+      - review-adjudication
+      - repair-strategy
+      - architecture
+      - takt
+      - contract-change
+      - $param: plan_policy
     rules:
       - condition: 修正対象あり
         next: fix-plan
@@ -118,6 +137,15 @@ steps:
       - condition: 必要な作業をプロジェクト内で進める手段がなく、その根拠と必要な外部操作または両立不能な条件が確認されている
         next: ABORT
   - name: fix-replan
+    input_reports:
+      - from_step: fix
+        reports: [fix-report.md]
+        optional_if_unrun: true
+        history: {previous: 2}
+      - from_step: fix-verifier
+        reports: [fix-verification.md]
+        optional_if_unrun: true
+        history: {previous: 2}
     uses: peer-review-fix-plan
     with:
       plan_policy:
@@ -135,6 +163,11 @@ steps:
       - condition: 必要な作業をプロジェクト内で進める手段がなく、その根拠と必要な外部操作または両立不能な条件が確認されている
         next: ABORT
   - name: verification-replan
+    input_reports:
+      - from_step: fix-verifier
+        reports: [fix-verification.md]
+        optional_if_unrun: true
+        history: {previous: 2}
     uses: peer-review-fix-plan
     with:
       plan_policy:

@@ -231,7 +231,7 @@ takt list
 | **Pull from remote** | リモート origin から最新の変更を取り込み（fast-forward のみ） |
 | **Try merge** | スカッシュマージ（コミットせずにステージング、手動レビュー用） |
 | **Merge & cleanup** | スカッシュマージしてブランチを削除 |
-| **Delete** | すべての変更を破棄してブランチを削除 |
+| **Delete** | タスクと worktree を削除してブランチを削除。削除される worktree/clone 内の未コミット変更も失われます（`worktree: false` のタスクと、`worktree` が `true` またはパス文字列で `worktree_path` が未記録のタスクはブランチを保持） |
 
 ### 失敗タスクの操作
 
@@ -311,9 +311,11 @@ PR を作成せず push だけを行うタスクでは、認証を修正して�
 4. 失敗コンテキスト、実行セッションデータ、workflow 構造がプリロードされたリトライ会話を開く
 5. AI の支援で指示を精緻化
 
-**Requeue** も同じ workflow と開始位置の選択を使用しますが、会話を開かずタスクを `pending` として保存します。開始位置の選択はワークフローをツリーとして表示します。有効な Resume 位置がある場合は先頭の行が **Resume failed position**（失敗地点から実行状態を引き継いで再開）になり、その下に選択可能な葉として各 step が並びます。`workflow_call` 配下のサブワークフローは選択できない見出しとして子 step をインデント表示するため、確定できるのは常に葉の step であり、サブワークフロー自体は選べません。有効な Resume 位置がある場合は Resume 行を初期選択し、ない場合は失敗した root step に対応する選択可能な葉を初期選択します。いずれかの葉を選ぶと、その step から新しい実行を開始します。
+**Requeue** も同じ workflow と開始位置の選択を使用しますが、会話を開かずタスクを `pending` として保存します。開始位置の選択はワークフローをツリーとして表示します。有効な Resume 位置がある場合は先頭の行が **Resume failed position**（失敗地点から実行状態を引き継いで再開）になり、その下に選択可能な葉として各 step が並びます。`workflow_call` 配下のサブワークフローは選択できない見出しとして子 step をインデント表示し、サブワークフロー自体は選べません。有効な Resume 位置がある場合は Resume 行を初期選択します。保存位置がなく既存の作業クローンがある場合は **Start workflow from the beginning** を初期選択し、同じクローンとブランチで workflow の初期 step から実行します。葉の step を明示的に選ぶと、その step から新しい実行を開始します。保存位置が無効な場合は、引き続き利用可能な再実行位置の選択またはキャンセルが必要です。
 
 端末の Resume 行は `Resume failed position: "review" (default)` のような短いラベルの直下に、経路の説明を薄い色で表示します。経路は root workflow を先頭、失敗 step を末尾とし、各呼び出しを `"呼び出し step" → "呼び出し先 workflow"` の組で表します。たとえば `"takt-default" > "develop" → "development-core" > "review"` となります。幅80列以上では説明を折り返して全経路を表示します。幅60列ではroot側を保持して説明だけを末尾から省略し、ラベルの失敗 step 名と既定印を表示します。Web UI のドロップダウンと `Selected start position: …` の確定ログには、ラベルと全経路の両方を残します。
+
+Retry・Requeue・Instruct で途中の step（`start_step` または保存した再開位置）から実行する場合、元の run でその step の対象の実行回を始める直前の system context・effects の結果・AI の構造化出力の全体を復元します。保存した再開位置の occurrence で実行回を照合し、`start_step` のように実行回を指定しない場合は、その step の最後の開始直前の状態を使います。対象の実行回がまだ始まっていなければ、最後に保存した状態を使います。ループでも、その時点に存在した前周回の結果を含めて復元し、依存関係を推測した削除は行いません。新しい run は、今回復元した状態を最初の step の実行前に保存し、以後は自分が開始する実行回の開始直前と実行後の状態だけを run context 内に保存します。元の run の実行回別の保存物はコピーしません。新しい run でまだ開始していない実行回を指す再開位置には、その新しい run の最後の保存状態を使います。最新状態は `workflow-results.json`、各実行回の開始前状態は `workflow-results/` 配下の個別ファイルに保存し、過去の履歴全体は書き直しません。結果が空でも保存物を作成します。保存や継承に失敗した場合は警告を出し、実行は継続します。保存に失敗した実行回は後続の保存でも記録し、未開始の実行回と区別します。その実行回からの再開では、別の時点の結果を代用せず、警告して空から始めます。保存に失敗した場合は無効状態の書き込みを試み、それも失敗した場合は古い保存物の削除を試みます。無効化または削除できた状態からの再開では、古い保存値で代用せず、警告して空から始めます。無効化も削除もできない場合は、その失敗も警告しますが、古い保存物が残ることがあります。前段の入力取得や effects、AI step は自動で再実行しません。後続の step による最新状態の取得は通常どおり行います。同じ名前の親 workflow から同じ call instance を続ける場合は、子についても選択した再開位置から読み戻す状態だけを、その子の最初の保存物として引き継ぎます。子へ入る前に失敗しても、次の再開でその状態を利用できます。子の過去の実行回別の保存物はコピーしません。新しい呼び出しや周回には以前の子の結果を写しません。親 workflow の名前が変わった場合、子の結果も引き継ぎません。この保存形式を持たない過去の run は、警告を出して従来どおり空の状態から途中再開します。保存されていない前段の結果を参照する場合は、その step で参照エラーになります。
 
 Requeue 後は新しい namespace で実行されるため、台帳を引き継がず白紙で開始します。
 
@@ -349,7 +351,7 @@ takt list --non-interactive --action try --branch takt/my-branch
 
 `--status`、`--goal`、`--branch` のいずれか1つ以上が必須です。無指定では何も削除せず、エラーで終了します。`--yes` を省略すると対象のタスク名・状態・ブランチ・ゴールの一覧を表示し、削除せず正常終了します。削除は `--yes` を指定した場合だけ行います。`--format json` を併せると対象一覧を JSON で取得でき、JSON 出力には `goal_id` が含まれます。
 
-削除する範囲は対話の一覧からの削除と同じで、タスクの作業場所の clone、worktree セッションのファイル、clone のメタ情報、ブランチ、`.takt/tasks.yaml` の記録です。clone のタスクでも、後片付けのあとに元のリポジトリの同名ブランチを `git branch -d` で削除します。未取り込みなどで Git が削除を拒否した場合は、ブランチを残して警告し、clone とタスクの記録の削除は成功します。
+削除する範囲は対話の一覧からの削除と同じで、タスクの作業場所の clone、worktree セッションのファイル、clone のメタ情報、ブランチ、`.takt/tasks.yaml` の記録です。clone のタスクでも、後片付けのあとに元のリポジトリの同名ブランチを `git branch -d` で削除します。`worktree: false` のタスクは記録されたブランチと作業ツリー上の変更を保持します。`worktree` が `true` またはパス文字列で `worktree_path` が未記録のタスクは、状態やブランチのマージ状況にかかわらず記録されたブランチを保持します。そのブランチの clone メタ情報が残っていれば、clone とメタ情報は片付けます。未取り込みなどで Git が削除を拒否した場合は、ブランチを残して警告し、clone とタスクの記録の削除は成功します。
 
 ```bash
 # 対象一覧を確認してから削除します
@@ -362,9 +364,9 @@ takt list --non-interactive --action delete --status failed pr_failed --format j
 
 ## CodeRabbit レビューループ（`caccia`）
 
-マージ用ビルトインは Caccia を明示的に実行します。`merge-review` は `review → caccia → wait_ci → 評価コメント`、`merge-review-fix` と `merge-review-fix-simple` は `review/fix → commit_and_push → caccia → wait_ci → merge_pr` の順です。`success` と `skipped` は返された head の CI 待ちへ進みます。`limit` は未解決件数をコメントして COMPLETE で終了し、マージしません。効果の失敗は `error` をコメントして ABORT で終了します。worktree タスクの `auto_pr` と Pipeline の `--auto-pr` は `caccia.enabled: true` の場合に PR 作成・更新成功後の Caccia を実行します。PR 公開失敗、PR がない場合、goal 管理タスク、GitHub 以外では後処理の Caccia を実行しません。実行した workflow、または `merge.auto_start: true` で選択されたマージ用 workflow に明示の `caccia` system 効果がある場合も後処理を抑止します。呼び出し先の workflow も判定対象です。それ以外は Caccia の完了後にマージ用 workflow を起動します。step 名や指示文の文字列は効果として扱いません。Git の push 自体からは起動せず、`takt merge` は引き続き明示効果で実行します。
+マージ用ビルトインは Caccia を明示的に実行します。`merge-review` は `review → caccia → wait_ci → 評価コメント`、`merge-review-fix` と `merge-review-fix-simple` は `sync → commit_and_push → caccia → wait_ci → merge_pr` の順です。AIで競合を解消した場合は、初回・再同期とも `commit_and_push` の前にレビュー・修正を行います。`success` と `skipped` は返された head の CI 待ちへ進みます。`limit` は未解決件数をコメントして ABORT で終了し、マージしません。効果の失敗は `error` をコメントして ABORT で終了します。worktree タスクの `auto_pr` と Pipeline の `--auto-pr` は `caccia.enabled: true` の場合に PR 作成・更新成功後の Caccia を実行します。PR 公開失敗、PR がない場合、goal 管理タスク、GitHub 以外では後処理の Caccia を実行しません。実行した workflow、または `merge.auto_start: true` で選択されたマージ用 workflow に明示の `caccia` system 効果がある場合も後処理を抑止します。呼び出し先の workflow も判定対象です。それ以外は Caccia の完了後にマージ用 workflow を起動します。step 名や指示文の文字列は効果として扱いません。Git の push 自体からは起動せず、`takt merge` は引き続き明示効果で実行します。
 
-`merge-review-fix` と `merge-review-fix-simple` はCI失敗が確定するたびに失敗チェック、run・attempt・jobの参照先、ログ本文、PRの累積差分、関連コードを調査します。フレークやmainでも失敗する欠陥はPRの作業ツリーで根本修正し、読み取り専用レビューを経てpush → Caccia → CI待ちへ戻ります。修正は最大2周です。外部要因を証拠で判断した場合だけ、修正回数とは独立してCIを1回再実行します。修正2周後も未使用なら再実行できます。同じHEADの新しいattemptを待ち、すべてのチェックと既存のマージ条件を再確認します。証拠不足、修正2周後も残る欠陥、修正レビューのREJECT、再実行後の失敗では回数・最後の失敗チェックと参照先・調査要点をPRへコメントしてABORTします。調査・修正レポートはrunに残ります。初回成功とCIのtimeoutの扱いは変わらず、`merge-review` はコメント専用のままです。GitHub Actionsのログ取得・再実行の権限不足や未対応Providerは明示します。
+`merge-review-fix` と `merge-review-fix-simple` はCI失敗が確定するたびに失敗チェック、run・attempt・jobの参照先、ログ本文、PRの累積差分、関連コードを調査します。フレークやmainでも失敗する欠陥はPRの作業ツリーで根本修正し、読み取り専用レビューを経てpush → Caccia → CI待ちへ戻ります。修正は最大2周です。外部要因を証拠で判断した場合だけ、修正回数とは独立してCIを1回再実行します。修正2周後も未使用なら再実行できます。同じHEADの新しいattemptを待ち、すべてのチェックと既存のマージ条件を再確認します。証拠不足、修正2周後も残る欠陥、修正レビューのREJECT、再実行後の失敗では回数・最後の失敗チェックと参照先・調査要点をPRへコメントしてABORTします。調査・修正レポートはrunに残ります。CIが初回から成功した場合は回復処理を行わず、CI待機のtimeoutは未解決としてABORTし、`merge-review` はコメント専用のままです。GitHub Actionsのログ取得・再実行の権限不足や未対応Providerは明示します。
 
 Caccia は CodeRabbit の投稿を待ち、`coderabbitai` が開始した未解決スレッドだけを処理します。各反復は一時クローンで指定された workflow を実行し、判断レポートを `.takt/runs/` に残します。修正を Push したら、その反復で判断したスレッドだけを Resolve し、Push したコミットへの CodeRabbit のレビューを待ちます。人が開始したスレッドは未解決のまま残します。レビューへの返信は投稿しません。成功と反復上限到達はログに記録し、設定済み通知経路にも送ります。
 

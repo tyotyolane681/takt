@@ -6,12 +6,17 @@
 ## Requirements Fulfillment Check
 | # | Requirement | Source | Status | Evidence |
 |---|-------------|--------|--------|----------|
-| 1 | {Independently decidable requirement} | {Location in the task specification} | {Fulfilled / Unfulfilled / Cannot determine} | {Current-code file:line or a verification result in a preceding report} |
+| 1 | {Independently decidable requirement} | {Location in the task specification} | {Fulfilled / Grounded deviation / Unfulfilled / Cannot determine} | {Current-code file:line or a verification result in a preceding report} |
 
 ## Re-evaluation of Prior Findings
 | Finding ID / Source | Acceptance Criteria | Status | Evidence |
 |---------------------|---------------------|--------|----------|
 | {ID and report name} | {Original acceptance criteria; if an adjudication exists, note any criteria it removed and the reasons} | {Resolved / Unresolved / Unsupported / Unnecessary expansion / Outside this task} | {Current-code file:line or a verification result in a preceding report} |
+
+## Repair History
+| Problem ID | Earlier Method and Assumptions | Resolved Conditions and Verification | Current Counterexample and Scope Evidence | Shared Cause and Remaining Assumption | Why Earlier Verification Missed It | Fixed-Version References | Actual Method and Fit to Latest Requirements / Adjudication |
+|------------|--------------------------------|--------------------------------------|------------------------------------------|---------------------------------------|------------------------------------|--------------------------| -------------------------- |
+| {Target ID, or N/A and reason} | {Earlier method and required assumptions} | {Checked inputs, paths, and results} | {New failure condition and requirement/code basis} | {Confirmed mechanism or unresolved hypotheses} | {Conditions not observed} | {Fixed paths and locations for the plan, repair, and verification from the same execution; note missing records} | {Actual method and evidence explaining its fit to the latest requirements and adjudication} |
 
 ## Unresolved Problems
 | Problem ID | Related Requirement or Finding | Violated Condition | Cause | Relevant Paths | Evidence | Completion Criteria | Required Action |
@@ -27,7 +32,7 @@
 - {Requirement that current code and preceding reports cannot decide, required external decision or information, and why task-scope code changes cannot provide it}
 ```
 
-- Select APPROVE only when every requirement is fulfilled and every preceding finding (or, when there is a review adjudication, every finding selected for repair in the latest adjudication) is resolved. Findings that adjudication treated as Outside this task or Unsupported, and criteria it removed for lack of a basis in the requirements or existing contracts, do not prevent APPROVE
+- Select APPROVE only when every requirement is fulfilled or recorded as a grounded deviation and every preceding finding (or, when there is a review adjudication, every finding selected for repair in the latest adjudication) is resolved. Findings that adjudication treated as Outside this task or Unsupported, and criteria it removed for lack of a basis in the requirements or existing contracts, do not prevent APPROVE
 - Select REJECT only when an unfulfilled requirement or unresolved finding is recorded with evidence in Unresolved Problems
 - Select BLOCKED only when a required external decision or information cannot be obtained through task-scope code changes and the available evidence cannot decide the requirement
 - Do not mark a requirement Cannot determine because a confirmation not required by the acceptance criteria or existing contracts remains unverified. Record that unverified fact in the requirement table's Evidence column and proceed with ordinary judgment

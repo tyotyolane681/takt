@@ -89,7 +89,10 @@ export function approveSummary(context: Tui): void {
 }
 export async function showProposal(context: Tui, summary = summaryA, revision = 4): Promise<void> {
   context.client.proposal(summary, revision);
-  await waitFor(() => expect(context.app.lastFrame()).toContain(summary.objective));
+  await waitFor(() => {
+    expect(context.app.lastFrame()).toContain(summary.objective);
+    expect(context.app.lastFrame()).toMatch(/Register goal|登録する/u);
+  });
 }
 export async function finish(context: Tui, message = 'Completed'): Promise<void> {
   const operationId = await context.client.operation();

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const doubles = vi.hoisted(() => ({ connect: vi.fn(), call: vi.fn(), close: vi.fn(), transportClose: vi.fn(), transport: vi.fn(), log: vi.fn() }));
+const doubles = vi.hoisted(() => ({ connect: vi.fn(), call: vi.fn(), close: vi.fn(), transportClose: vi.fn(), transport: vi.fn(), httpTransport: vi.fn(), log: vi.fn() }));
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({ Client: class { connect = doubles.connect; callTool = doubles.call; close = doubles.close; } }));
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({ StdioClientTransport: class { close = doubles.transportClose; constructor(input: unknown) { doubles.transport(input); } } }));
+vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({ StreamableHTTPClientTransport: class { close = doubles.transportClose; constructor(url: URL, options: unknown) { doubles.httpTransport(url, options); } } }));
 vi.mock('../shared/utils/private-file.js', () => ({ appendPrivateFile: doubles.log }));
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { executeMockMcpCalls } from '../infra/mock/mcp.js';
@@ -21,6 +22,31 @@ beforeEach(() => {
 });
 afterEach(() => { resetScenario(); vi.unstubAllEnvs(); });
 describe('mock provider real MCP calls', () => {
+  it.each(['get_issue', 'add_issue', 'takt_enqueue_goal_task'])(
+    'allows an unknown tool %s through an explicit server-wide grant', async (tool) => {
+      const onCallCompleted = vi.fn();
+      const request = { server: 'backlog', tool, arguments: { id: 'issue-1' } };
+      const granted: MockCallOptions = {
+        cwd: '/project', allowedTools: ['mcp__backlog'],
+        preparedMcp: { dispose: async () => {}, resolvedServers: {
+          enabled: true, identity: 'backlog-fixture', serverNames: ['backlog'],
+          servers: { backlog: { type: 'stdio', command: 'fixture' } },
+        } },
+      };
+
+      await expect(executeMockMcpCalls([request], granted, onCallCompleted)).resolves.toBe('completed');
+
+      expect(doubles.call).toHaveBeenCalledWith({ name: tool, arguments: request.arguments }, undefined, { signal: undefined });
+      expect(onCallCompleted).toHaveBeenCalledWith({ server: 'backlog', tool, result: { content: [] } });
+    },
+  );
+
+  it.each(['mcp__manage', 'mcp__manager-other', 'mcp__manager__other_tool'])(
+    'rejects grants for a different server or tool: %s', async (grant) => {
+      await expect(executeMockMcpCalls(calls, { ...options, allowedTools: [grant] }, vi.fn())).rejects.toThrow('not allowed');
+      expect(doubles.connect).not.toHaveBeenCalled();
+    },
+  );
   it('executes configured MCP tools with full permissions and no tool allowlist', async () => {
     const onCallCompleted = vi.fn();
     await expect(executeMockMcpCalls(calls, {
@@ -51,6 +77,25 @@ describe('mock provider real MCP calls', () => {
     expect(doubles.close).toHaveBeenCalledTimes(1);
     expect(doubles.transportClose).toHaveBeenCalledTimes(1);
     expect(doubles.transport).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/project', command: 'node', stderr: 'inherit' }));
+  });
+  it('uses the configured HTTP endpoint and headers and records the executed transport', async () => {
+    vi.stubEnv('TAKT_MOCK_CALL_LOG', '/calls.jsonl');
+    const signal = new AbortController().signal;
+    const http: MockCallOptions = { ...options, abortSignal: signal, preparedMcp: {
+      dispose: async () => {}, resolvedServers: { enabled: true, identity: 'http', serverNames: ['manager'],
+        servers: { manager: { type: 'http', url: 'http://127.0.0.1:12345/mcp', headers: { 'x-manager': 'assignment' } } } },
+    } };
+    setMockScenario([{ status: 'done', content: 'done', mcpToolCalls: calls }]);
+    await expect(callMock('manager', 'task', http)).resolves.toMatchObject({ status: 'done' });
+    expect(doubles.httpTransport).toHaveBeenCalledExactlyOnceWith(new URL('http://127.0.0.1:12345/mcp'),
+      { requestInit: { headers: { 'x-manager': 'assignment' } } });
+    expect(doubles.transport).not.toHaveBeenCalled();
+    expect(doubles.connect).toHaveBeenCalledWith(expect.anything(), { signal });
+    expect(doubles.call).toHaveBeenCalledWith({ name: calls[0]!.tool, arguments: calls[0]!.arguments }, undefined, { signal });
+    expect(doubles.close).toHaveBeenCalledOnce();
+    expect(doubles.transportClose).toHaveBeenCalledOnce();
+    expect(doubles.log.mock.calls.map(([, content]) => JSON.parse(content))).toContainEqual(
+      expect.objectContaining({ event: 'mcp_tool_call', mcpToolCall: expect.objectContaining({ transport: 'http' }) }));
   });
   it('refuses an unallowed tool before launching a server', async () => {
     await expect(executeMockMcpCalls(calls, { ...options, allowedTools: [] }, vi.fn())).rejects.toThrow('not allowed');

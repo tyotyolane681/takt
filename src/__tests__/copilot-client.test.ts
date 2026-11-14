@@ -68,6 +68,7 @@ function mockSpawnWithScenario(scenarios: SpawnScenario | SpawnScenario[]): void
       if (scenario.error) {
         const error = Object.assign(new Error(scenario.error.message), scenario.error);
         child.emit('error', error);
+        child.emit('close', null, null);
         return;
       }
 
@@ -179,7 +180,7 @@ describe('callCopilot', () => {
     });
 
     const preparedMcp = {
-      args: ['--additional-mcp-config=@/tmp/task-state.json'],
+      args: ['--disable-mcp-server', 'datadog', '--additional-mcp-config=@/tmp/task-state.json'],
       dispose: vi.fn().mockResolvedValue(undefined),
     };
     const result = await callCopilot('coder', 'read task state', {

@@ -11,9 +11,13 @@
 ```yaml
 # ~/.takt/config.yaml
 language: en                  # UI 语言：'en' 或 'ja'
+director:
+  slack:
+    channel_id: C0DIR
+    allowed_user_ids: [U0AAA]
 logging:
   level: info                 # 日志级别：debug、info、warn、error
-provider: claude-sdk              # 默认 provider：claude-sdk、claude、claude-headless、claude-terminal、codex、opencode、deepseek-harness、cursor、copilot、kiro、pi 或 mock
+provider: claude-sdk              # 默认 provider：claude-sdk、claude、claude-headless、claude-terminal、codex、opencode、deepseek-harness、cursor、copilot、kiro、devin、pi 或 mock
 model: sonnet                 # 默认 model（可省略，原样传给 provider）
 branch_name_strategy: romaji  # 分支名生成策略：'romaji'（快）或 'ai'（慢）
 prevent_sleep: false          # 执行期间阻止 macOS 空闲睡眠（caffeinate）
@@ -108,6 +112,7 @@ assistant:
 # cursor_cli_path: /usr/local/bin/cursor-agent
 # copilot_cli_path: /usr/local/bin/github-copilot-cli
 # kiro_cli_path: /usr/local/bin/kiro-cli
+# devin_cli_path: /usr/local/bin/devin
 
 # VCS provider（可选）
 # 根据 git remote URL 自动检测（github.com → github，gitlab.com → gitlab）
@@ -149,6 +154,8 @@ assistant:
 #   custom_scripts: false                # 允许自定义脚本（默认 false；builtin preset 始终允许）
 # workflow_command_gates:                # Workflow YAML command quality gate 策略
 #   custom_scripts: false                # 允许来自 workflow YAML 的 command gate（默认 false）
+# workflow_system_commands:             # Workflow system command input 策略
+#   custom_scripts: false
 # sync_conflict_resolver:                # Sync conflict resolver 策略
 #   auto_approve_tools: false            # 允许工具自动批准（默认 false）
 
@@ -178,12 +185,14 @@ assistant:
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `language` | `"en"` \| `"ja"` | `"en"` | UI 语言 |
+| `director.slack.channel_id` | string | - | director 的 Slack 频道。仅限全局配置，参阅[通过 Slack 与 director 对话](#通过-slack-与-director-对话)。 |
+| `director.slack.allowed_user_ids` | string[] | - | 允许从 Slack 向 director 发言的用户。配置 `director.slack` 时必填；空数组表示不接受任何用户的发言。 |
 | `logging.level` | `"debug"` \| `"info"` \| `"warn"` \| `"error"` | `"info"` | 日志级别 |
 | `logging.trace` | boolean | `false` | 启用 trace 级日志 |
 | `logging.debug` | boolean | `false` | 启用 debug 日志（`debug.log` + `prompts.jsonl`） |
 | `logging.provider_events` | boolean | `false` | 持久化 provider stream event |
 | `logging.usage_events` | boolean | `false` | 持久化 usage event 日志 |
-| `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-headless"` \| `"claude-terminal"` \| `"codex"` \| `"opencode"` \| `"deepseek-harness"` \| `"pi"` \| `"cursor"` \| `"copilot"` \| `"kiro"` \| `"mock"` | `"claude-sdk"` | 默认 AI provider（`claude` 是 `claude-sdk` 的别名，`claude-headless` 使用 headless CLI）；`deepseek-harness` 是官方 DeepSeek Harness TypeScript SDK/runtime `0.2.1-alpha.2` |
+| `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-headless"` \| `"claude-terminal"` \| `"codex"` \| `"opencode"` \| `"deepseek-harness"` \| `"pi"` \| `"cursor"` \| `"copilot"` \| `"kiro"` \| `"devin"` \| `"mock"` | `"claude-sdk"` | 默认 AI provider（`claude` 是 `claude-sdk` 的别名，`claude-headless` 使用 headless CLI）；`deepseek-harness` 是官方 DeepSeek Harness TypeScript SDK/runtime `0.2.1-rc.5` |
 | `model` | string | - | 默认 model 名称，原样传给 provider |
 | `branch_name_strategy` | `"romaji"` \| `"ai"` | `"romaji"` | 分支名生成策略 |
 | `prevent_sleep` | boolean | `false` | 阻止 macOS 空闲睡眠 |
@@ -192,11 +201,12 @@ assistant:
 | `concurrency` | number (1-10) | `1` | `takt run` / `takt watch` 并行任务数 |
 | `task_poll_interval_ms` | number (100-5000) | `500` | 新任务轮询间隔 (`takt run` / `takt watch`) |
 | `interactive_preview_steps` | number (0-10) | `3` | 交互模式中的 step 预览数 |
-| `assistant.formal_spec` | boolean \| `"Y/n"` \| `"y/N"` \| object | mode `"y/N"`，comments `true` | 添加 Alloy/Quint 指导，要求同时用两种记法表达。object 格式可独立设置 `mode`、`comments` 和 `model_check_timeout_seconds`；`comments: false` 仅移除自然语言含义注释指令，不减少形式规格数量、需求覆盖、语法或正确性指令。`model_check_timeout_seconds` 是 `/verify` 中 `quint verify` 与 Alloy Analyzer 的上限秒数（1～86,400 的整数，默认 900），`parse`/`typecheck`/`run` 的 60 秒不变。project 和 global 的 object 字段独立解析，project 优先。`true` 和 `false` 不提问；TTY 下 `"Y/n"`、`"y/N"` 每个会话提问一次并分别以 Yes、No 为默认值；非 TTY 不读取标准输入，直接采用默认答案。Gherkin 指导仅适用于开发和实现任务。 |
+| `assistant.formal_spec` | boolean \| `"Y/n"` \| `"y/N"` \| object | mode `"y/N"`，comments `true` | 添加 Alloy/Quint 指导，要求同时用两种记法表达。object 格式可独立设置 `mode`、`comments` 和 `model_check_timeout_seconds`；`comments: false` 仅移除自然语言含义注释指令，不减少形式规格数量、需求覆盖、语法或正确性指令。`model_check_timeout_seconds` 是 `/verify` 中 `quint verify` 与 Alloy Analyzer 的上限秒数（1～86,400 的整数，默认 900），`parse`/`typecheck`/`run` 的 60 秒不变。project 和 global 的 object 字段独立解析，project 优先。`true` 和 `false` 不提问；TTY 下 `"Y/n"`、`"y/N"` 每个会话提问一次并分别以 Yes、No 为默认值；非 TTY 不读取标准输入，直接采用默认答案。Gherkin 指导仅适用于开发和实现任务。 manager 也使用此设置且不会询问：`true`/`"Y/n"` 包含两种记法，`false`/`"y/N"` 则不包含。TUI 和 Slack 的 manager 对话也支持 `/verify`。 |
 | `auto_requeue_max_attempts` | 非负整数 | `0` | 失败 workflow task 的自动 requeue 上限；`0` 禁用 (`takt run` / `takt watch`) |
 | `ignore_exceed` | boolean | `false` | 配置 `takt run` 和 `takt watch` 的迭代上限绕过 |
 | `sync_project_local_takt_on_retry` | boolean | `true` | 在选择重试位置或检查 SDK 之前，将根项目的 `.takt` 同步到现有 worktree。即使拒绝安装 SDK 或取消选择，已同步的文件也会保留。设为 `false` 时保留 worktree 中的副本。 |
 | `worktree_dir` | string | - | shared clone 目录，默认 `../{clone-name}` |
+| `manager.preserve_goal_worktree` | boolean | `false` | manager 取入 goal 任务成果后保留 worktree 及 run 记录，参阅[Goal 任务 worktree 保留](#goal-任务-worktree-保留)。 |
 | `allow_git_hooks` | boolean | `false` | 允许 TAKT 管理的自动 commit 运行 git hooks |
 | `allow_git_filters` | boolean | `false` | 允许 TAKT 管理的自动 commit 运行 git filters |
 | `auto_pr` | boolean | - | worktree 执行后自动创建 PR |
@@ -225,6 +235,7 @@ assistant:
 | `cursor_cli_path` | string | - | Cursor Agent CLI 绝对路径覆盖 |
 | `copilot_cli_path` | string | - | Copilot CLI 绝对路径覆盖 |
 | `kiro_cli_path` | string | - | Kiro CLI 绝对路径覆盖 |
+| `devin_cli_path` | string | - | Devin CLI 绝对路径覆盖 |
 | `enable_builtin_workflows` | boolean | `true` | 是否启用 builtin workflow |
 | `disabled_builtins` | string[] | `[]` | 按 workflow `name` 禁用 builtin workflow |
 | `pipeline` | object | - | Pipeline 模板设置 |
@@ -241,6 +252,7 @@ assistant:
 | `workflow_arpeggio` | object | 全部 `false` | Arpeggio 自定义代码策略 |
 | `workflow_runtime_prepare` | object | `{ custom_scripts: false }` | Runtime prepare 策略 |
 | `workflow_command_gates` | object | `{ custom_scripts: false }` | Workflow YAML command quality gate 策略 |
+| `workflow_system_commands` | object | `{ custom_scripts: false }` | Workflow system command input 策略 |
 | `workflow_overrides` | object | - | workflow 级 `quality_gates` 与 `quality_gates_edit_only` 覆盖 |
 | `sync_conflict_resolver` | object | `{ auto_approve_tools: false }` | sync conflict resolver 策略 |
 | `observability` | object | disabled | opt-in OpenTelemetry 基础设施 |
@@ -309,7 +321,7 @@ ignore_exceed: false          # 对 takt run 和 takt watch 应用 --ignore-exce
 #     - .takt/assistant-notes.md
 
 # provider 专属选项（旧版项目默认值；runtime.yaml 的 profile 现在拥有这些选项）
-# codex / claude / claude_terminal / cursor / copilot / kiro / pi 也支持
+# codex / claude / claude_terminal / cursor / copilot / kiro / devin / pi 也支持
 #   guards.call_timeout_ms（未设置时为 60 分钟）。
 # provider_options:
 #   codex:
@@ -328,6 +340,7 @@ ignore_exceed: false          # 对 takt run 和 takt watch 应用 --ignore-exce
 #       reasoning_byte_limit: 4194304
 #   kiro:
 #     agent: my-default-agent
+#     effort: medium
 #   pi:
 #     extensions: [npm:pi-fff]
 #     no_skills: true
@@ -401,7 +414,7 @@ provider_options:
 
 ### Provider inactivity deadline 与 OpenCode execution guard
 
-所有 provider 都使用 `guards.call_timeout_ms` 作为没有可观察 provider event 时允许的最长时间。每个 stream/tool event、阶段完成和新的 provider attempt 都会重置计时器；累计执行时间没有上限。它适用于 `codex`、`opencode`、`claude`（由 `claude-sdk`、别名 `claude` 和 `claude-headless` 共享）、`claude_terminal`、`cursor`、`copilot`、`kiro` 和 `pi`。取值是 60,000 到 86,400,000 之间的整数毫秒，默认 3,600,000 ms（60 分钟）。通常的 `provider_options` profile 解析路径会将该值应用到 engine 的 parent-step deadline，并向所有 provider 传递同一个 `AbortSignal`。`claude_terminal.timeout_ms` 为兼容性保留，仅在未设置 `guards.call_timeout_ms` 时使用。
+所有 provider 都使用 `guards.call_timeout_ms` 作为没有可观察 provider event 时允许的最长时间。每个 stream/tool event、阶段完成和新的 provider attempt 都会重置计时器；累计执行时间没有上限。它适用于 `codex`、`opencode`、`claude`（由 `claude-sdk`、别名 `claude` 和 `claude-headless` 共享）、`claude_terminal`、`cursor`、`copilot`、`kiro`、`devin` 和 `pi`。取值是 60,000 到 86,400,000 之间的整数毫秒，默认 3,600,000 ms（60 分钟）。通常的 `provider_options` profile 解析路径会将该值应用到 engine 的 parent-step deadline，并向所有 provider 传递同一个 `AbortSignal`。`claude_terminal.timeout_ms` 为兼容性保留，仅在未设置 `guards.call_timeout_ms` 时使用。
 
 `provider_options.opencode.guards.profile` 默认是 `standard`。`minimal` 只关闭启发式循环检测；时间、资源上限、完整性和严格修正 guard 仍然强制启用。`model_profiles` 按解析出的 model 字符串以声明顺序选择 profile，唯一通配符是 `*`。guard leaf 在 provider-option 层之间独立合并；较高优先级的 `model_profiles` 值会替换较低优先级的完整 map。
 
@@ -429,7 +442,7 @@ TAKT 观察实际收到的 provider event，不会合成 keepalive。OpenCode �
 | `ignore_exceed` | boolean | `false` | `takt run` / `takt watch` 的迭代限制绕过 |
 | `base_branch` | string | - | 创建 clone 的基分支 |
 | `assistant.init_files` | string[] | - | 仅项目级的 assistant 初始上下文文件。路径必须相对于项目根；绝对路径、解析到项目根之外的路径，以及 `.env*`、`.npmrc`、`.pypirc`、`.netrc`、`*.pem`、`*.key` 和 `.git/**` 等敏感文件模式会被拒绝。路径不存在、指向目录或文件不可读时会明确报错。最多 16 个文件，每个最多 256 KiB，合计最多 1 MiB。未设置或为空时，TAKT 不会自动发现 `CLAUDE.md`、`AGENT.md`、`AGENTS.md`、`TAKT.md` 或其他文件。 |
-| `assistant.formal_spec` | boolean \| `"Y/n"` \| `"y/N"` \| object | mode `"y/N"`，comments `true`（来自全局/默认值） | 项目级覆盖，添加 Alloy/Quint 指导并要求同时用两种记法表达。object 格式可独立设置 `mode`、`comments` 和 `model_check_timeout_seconds`，未设置的字段回退到全局或默认值。`comments: false` 仅移除自然语言含义注释指令，不减少形式规格数量、需求覆盖、语法或正确性指令。项目值优先于全局值。提示回答仅在当前会话中生效，恢复会话时重新解析。ACP 和非 TTY 不提问，使用配置的默认答案。Gherkin 指导仅适用于开发和实现任务。已弃用的 `assistant.gherkin` 会警告后忽略，不转换、不持久化，也不修改配置文件。 |
+| `assistant.formal_spec` | boolean \| `"Y/n"` \| `"y/N"` \| object | mode `"y/N"`，comments `true`（来自全局/默认值） | 项目级覆盖，添加 Alloy/Quint 指导并要求同时用两种记法表达。object 格式可独立设置 `mode`、`comments` 和 `model_check_timeout_seconds`，未设置的字段回退到全局或默认值。`comments: false` 仅移除自然语言含义注释指令，不减少形式规格数量、需求覆盖、语法或正确性指令。项目值优先于全局值。提示回答仅在当前会话中生效，恢复会话时重新解析。ACP 和非 TTY 不提问，使用配置的默认答案。Gherkin 指导仅适用于开发和实现任务。已弃用的 `assistant.gherkin` 会警告后忽略，不转换、不持久化，也不修改配置文件。 manager 也使用此设置且不会询问：`true`/`"Y/n"` 包含两种记法，`false`/`"y/N"` 则不包含。TUI 和 Slack 的 manager 对话也支持 `/verify`。 |
 | `provider_options` | object | - | provider 专属选项 |
 | `provider_profiles` | object | - | provider 专属权限 profile |
 | `vcs_provider` | `"github"` \| `"gitlab"` | 自动检测 | 覆盖全局 VCS provider |
@@ -438,6 +451,7 @@ TAKT 观察实际收到的 provider event，不会合成 keepalive。OpenCode �
 | `workflow_arpeggio` | object | - | Arpeggio 自定义代码策略覆盖 |
 | `workflow_runtime_prepare` | object | - | Runtime prepare 策略覆盖 |
 | `workflow_command_gates` | object | - | Workflow YAML command quality gate 策略覆盖 |
+| `workflow_system_commands` | object | - | Workflow system command input 策略 |
 | `sync_conflict_resolver` | object | - | Sync conflict resolver 策略覆盖 |
 | `observability` | object | - | 项目级 OpenTelemetry opt-in 覆盖 |
 
@@ -476,30 +490,189 @@ TAKT_ALLOY_CONCURRENCY=1 TAKT_ALLOY_HEAP=2g TAKT_ALLOY_STACK=128m takt
 
 如果写入保留标记失败，TAKT 会将所有权标记移动为保留标记，并报告目录路径和写入错误。如果移动也失败，TAKT 会保留所有权标记，提示无法确认保留状态，并报告目录路径和两个错误。即使所属 Node 进程退出，剩余的所有权标记仍会保护目录，使其不被自动清理。请手动复制所需的产物。
 
+## Workflow system command input 策略
+
+默认为禁用。project的显式值（包括`false`）优先于global；project未指定时使用global值。未授权的command input在workflow加载时失败。此权限独立于`workflow_command_gates.custom_scripts`。
+
+```yaml
+workflow_system_commands:
+  custom_scripts: true
+```
+
+`TAKT_WORKFLOW_SYSTEM_COMMANDS_CUSTOM_SCRIPTS=true`
+
+此环境变量优先于project和global设置；即使project设置为`true`，`false`也会拒绝授权。
+
+独立clone使用原project配置。每次运行解析权限并传给root和子workflow，`wait`期间不重新加载。
+
+当 pipeline 或交互模式在当前目录检出 PR 时，会在切换分支前解析权限。交互会话在同一目录中保留该权限，切换到 Issue 后也使用该权限。仅由 PR 添加的 project 设置不会授予权限。
+
 ## 环境变量覆盖
 
 大多数配置 key 都可以通过 `TAKT_` 加上大写、下划线连接的 key 路径覆盖：`logging.debug` 变成 `TAKT_LOGGING_DEBUG`，`telemetry.routing_decisions` 变成 `TAKT_TELEMETRY_ROUTING_DECISIONS`。常见例子包括 `TAKT_PROVIDER`、`TAKT_MODEL`、`TAKT_CONCURRENCY`、`TAKT_LOGGING_DEBUG`、`TAKT_TELEMETRY_ROUTING_DECISIONS` 和 `TAKT_OBSERVABILITY_ENABLED`。环境变量优先于对应文件值，并在拥有该 key 的配置层解析。
 
 除了配置 key 覆盖外，`TAKT_NOTIFY_WEBHOOK` 设置 Slack Incoming Webhook URL。设置后，TAKT 会在 pipeline 完成和 `takt run` 任务批次结束时发送 Slack 通知。
 
-## manager 敏感文件设置
+## Goal 任务 worktree 保留
 
-通过全局 `~/.takt/config.yaml` 或项目 `.takt/config.yaml` 中的 `manager.sensitive_paths`，可以添加即使位于负责仓库内也需要交给 manager 权限判断 agent 的文件和目录。
+在项目 `.takt/config.yaml` 或全局 `~/.takt/config.yaml` 中设置 `manager.preserve_goal_worktree: true`，即可在 manager 通过 `takt_merge_goal_task` 成功取入 goal 任务成果后保留 worktree。项目值优先于全局值。无论审查过的成果此前已经取入，还是本次操作执行新的 merge，都适用此设置。
 
 ```yaml
 manager:
-  sensitive_paths:
-    - private
-    - config/credentials.json
+  preserve_goal_worktree: true
 ```
 
-默认项为 `.env`、`.env.*`、`id_rsa`、`id_dsa`、`id_ecdsa`、`id_ed25519`、`*.key`、`*.pem`、`*.crt`、`*.cer`、`*.p12`、`*.pfx`。两个配置列表都会追加到默认项，省略或设置为空列表也不能删除默认项。单独的名称适用于任意目录深度。包含目录部分的相对路径以各个负责仓库为基准，也支持绝对路径和 `~/` 路径。目录项包含其所有下级文件和目录。名称模式支持在开头或末尾使用单个 `*`；此设置不用于定义允许规则。
+worktree、clone metadata，以及 worktree 内 `.takt/runs` 下的 reports 和 logs 都会保留。completed 任务记录也照常保留，不会自动删除任务历史。默认 `false` 维持原有 worktree 和 clone metadata cleanup 以及 `cleanupWarning` 行为。此设置不改变普通 `completeTask`、List Tasks 中的手动 merge 或 delete、PR merge 任务及未取入任务的行为。
 
-Claude 的 `Read`、`Glob` 和 `Grep` 只有在路径和符号链接解析后的目标全部是负责范围内可读取的普通目标时，才能跳过权限判断 agent。搜索候选通过路径和元数据检查，不会读取敏感文件的内容。搜索模式支持使用 `*`、`**` 和 `?` 的简单形式；排除、花括号展开、字符类、转义或无法确定范围的指定都会交给权限判断 agent。隐藏路径、遍历的目录和符号链接会被保守地检查，因此即使搜索条件较严格，也仍可能需要审查。Codex 的内置工具仍然需要审查。
+## manager 的任务 workflow
+
+在全局 `~/.takt/config.yaml` 或项目 `.takt/config.yaml` 中设置 `manager.workflows`，指定 manager 创建开发任务时可选的 workflow。项目值替换整个全局列表。元素可以是名称字符串，或仅含一对 `{ 名称: 使用说明 }` 的对象，与 `workflow_categories.workflows` 的写法一致。
+
+```yaml
+manager:
+  workflows:
+    - default: 常规功能开发和缺陷修复，从计划到审查。
+    - simple: 只需修改一两个文件的小任务。
+    - takt-default
+```
+
+在项目与全局两层都未设置 `manager.workflows` 时，候选项为 `default` 和 `simple`。manager 根据 `language` 获取上述日文或英文的使用说明，并选择适合任务的 workflow。显式的纯名称元素不补充说明。`workflows: all` 恢复不受限制的选择。创建 manager 会话计划时会警告并忽略找不到的名称；空名称、多键对象等无效格式会在加载配置时被拒绝。
+
+manager 的 `takt_list_workflows` 只返回允许的候选项，以及 workflow 自身的 `description` 和配置中的可选 `usageDescription`。`takt_enqueue_goal_task` 会拒绝范围外的新任务，并在错误中列出允许项和配置路径。已有任务仍可使用原 workflow 恢复、重新入队或重试。PR 收尾 `takt_merge_goal_pr`（`merge.prepare_workflow` / `merge.workflow`）、子 `workflow_call`、非 manager MCP 和手动 CLI 不受限制。workspace manager 按目标仓库应用配置。
+
+## manager 工具权限
+
+在项目 `.takt/config.yaml` 或全局 `~/.takt/config.yaml` 中配置：
+
+```yaml
+manager:
+  permission: full
+  provider_permissions:
+    claude: auto
+```
+
+`manager.permission` 接受 `auto`（默认）或 `full`。`manager.provider_permissions`
+将 provider 名映射到相同的值，默认为空。此例仅对 Claude 启用 AI 权限审核，其他 provider 使用完整权限。
+
+解析顺序：project 的 provider 覆盖 → global 的 provider 覆盖 → project 的 `permission` →
+global 的 `permission` → `auto`。按 manager turn 实际解析的 provider 查找。
+`claude` 和 `claude-sdk` 互为别名；同一层中同时配置时，精确匹配的键优先。
+仓库 manager 使用该仓库的配置。workspace manager 使用第一个已注册仓库的配置，
+尚无仓库时使用 workspace 专用目录，与 `auto_run` 等现有 manager 设置一致。
+
+- **Claude（`claude` / `claude-sdk`）**：`auto` 使用 SDK `permissionMode: auto`，
+  不绕过权限检查，分类器允许或拒绝工具调用。`full` 保持 `bypassPermissions`。
+- **Codex**：`auto` 使用 `workspace-write`、`approvalPolicy: on-request` 和
+  `approvals_reviewer = "auto_review"`。为 `gh` 等命令启用网络访问。
+  AI 审核权限扩展请求，即使无人值守也可批准。`full` 保持 `danger-full-access` 和 `approvalPolicy: never`。
+- **其他 provider**：没有此 AI 权限审核机制，`auto` 与 `full` 行为相同。
+
+manager MCP 工具保留现有审批允许列表，两种模式下均可免确认使用。
+AI 拒绝的操作作为工具结果返回 manager。TAKT 不会自动将拒绝转换为人工询问。
+这些设置仅适用于 manager turn，不改变 workflow step 或 run 的权限。
+
+## 通过 Slack 与 manager 对话
+
+在对话消息列中发送 `/make-goal` 可创建注册提案。使用「Register goal（注册目标）」或「Return to conversation without registering（不注册并返回对话）」操作；旧版本提案的按钮无效。
+
+通过 Slack 的 Socket Mode，可以与 manager 对话，无需提供公开 URL。对话回复和询问的回答使用下述 Slack App；“目标已完成”等通知仍通过 `TAKT_NOTIFY_WEBHOOK` 配置的 Incoming Webhook 发送。两者可以同时使用。
+
+### 创建 Slack App
+
+1. 在 Slack 的 App 创建页面选择 **From an app manifest**，选定工作区，然后粘贴以下 YAML：
+
+   ```yaml
+   display_information:
+     name: TAKT manager
+   features:
+     bot_user:
+       display_name: TAKT manager
+       always_online: true
+   oauth_config:
+     scopes:
+       bot:
+         - chat:write
+         - channels:history
+         - groups:history
+   settings:
+     event_subscriptions:
+       bot_events:
+         - message.channels
+         - message.groups
+     interactivity:
+       is_enabled: true
+     socket_mode_enabled: true
+   ```
+
+2. 将 App 安装到工作区，在 **OAuth & Permissions** 中复制机器人令牌（`xoxb-…`）。
+3. 在 **Basic Information → App-Level Tokens** 中创建带有 `connections:write` 权限的 App-Level Token，并复制该令牌（`xapp-…`）。
+4. 在用于对话的频道中执行 `/invite @TAKT manager`，邀请机器人加入。
+5. 在 Slack 的频道详情中查看频道 ID。打开每位获准用户的个人资料，选择“复制成员 ID”以获取用户 ID。
+
+### 配置和启动
+
+在仓库的 `.takt/config.yaml` 中指定一个对话频道，以及允许发送消息和操作按钮的 Slack 用户：
+
+```yaml
+manager:
+  slack:
+    channel_id: C0123ABCD
+    allowed_user_ids: [U0AAAAAA]
+```
+
+`manager.slack` 仅支持仓库配置，不能写入全局 `~/.takt/config.yaml`。不要在 `manager.slack` 中填写令牌；配置验证会拒绝令牌字段。
+
+仓库的 `.takt/config.yaml` 可能纳入版本控制并与他人共享。修改 `manager.slack.allowed_user_ids` 会改变哪些 Slack 用户可以向 manager 发送输入。启动 daemon 前，请检查仓库配置的变更，并仅使用你信任的配置。
+
+Slack 配置和已注册的仓库列表在 daemon 启动时读取。更改后，请运行 `takt daemon stop` 并重新启动 daemon，以应用包括移除允许用户在内的更改。
+
+在启动 daemon 的 shell 中设置两个令牌环境变量，然后使用 `takt manager` 或 `takt daemon` 启动。例如：
+
+```bash
+export TAKT_SLACK_APP_TOKEN='xapp-...'
+export TAKT_SLACK_BOT_TOKEN='xoxb-...'
+takt manager
+```
+
+`TAKT_SLACK_APP_TOKEN` 使用带有 `connections:write` 权限的 App-Level Token，`TAKT_SLACK_BOT_TOKEN` 使用机器人令牌。daemon 读取后会从自身环境中删除这两个变量，避免 provider 和工具子进程继承令牌。没有自动启动机制，需要使用上述命令之一启动 daemon。
+
+只要有仓库配置了 Slack，且两个令牌均已设置，即使没有任务，daemon 也会继续监听。未配置 Slack 或缺少任一令牌时，daemon 仍按原有规则在空闲时退出。如果两个仓库配置了同一频道，两者的 Slack 都会被禁用，原因会写入 `~/.takt/logs/daemon.log`。
+
+### 对话和回答询问
+
+- 在配置的频道中发消息，manager 会在该消息的消息列中回复；之后请在同一消息列继续交流。该仓库的所有对话消息列都连接到同一个 manager 对话，并与 TUI 共享。回复只发送到发言所在的消息列；对 TUI 发言的回复不会发送到 Slack。
+- 不响应其他频道中的消息、发给机器人的私信，以及不在 `allowed_user_ids` 中的用户发送的消息或按钮操作。
+- 处理期间仍可持久化接受发言、批准和询问回答。人工输入优先于其他事件，每条队列按接受顺序执行。accepted 表示已保存，不表示处理完成。界面读取和中断不进入模型队列；中断只影响当前轮次，不删除等待输入。等待输入在 daemon 重启后保留，但目前不保证恢复 Slack 回复目标。失败或中断后，manager 检查当前状态和副作用，自行判断恢复、修正后重试或提交新工作。Slack ACK 只表示通信接收，不表示业务接受。
+- 问题和操作请求会发送到配置的频道。使用按钮选择选项或报告结果，使用线程回复填写自由文本。不再提供权限范围选择或权限文本保存。
+- 自由文本回答应回复到对应询问的消息列。当消息与询问的关联有效时，回复会作为回答处理，不会进入 manager 对话。回答会以 `slack` 为来源保存。
+- 询问变化通过监测事件送达，Slack 不定期扫描所有询问。连接前的询问可在 TUI 中按 `Ctrl+R` 回答。如果询问关联无法读取，则拒绝该回复，不把它作为普通对话发送。
+- “目标已完成”等通知不会通过对话连接发布，仍由 `TAKT_NOTIFY_WEBHOOK` 发送。
+
+## 通过 Slack 与 director 对话
+
+在全局 `~/.takt/config.yaml` 中配置 director 频道和允许的用户，不要写入项目的 `.takt/config.yaml`：
+
+```yaml
+# ~/.takt/config.yaml
+director:
+  slack:
+    channel_id: C0DIR
+    allowed_user_ids: [U0AAA]
+```
+
+使用与 manager 相同的 Slack App 和环境变量 `TAKT_SLACK_APP_TOKEN` / `TAKT_SLACK_BOT_TOKEN`。按照[创建 Slack App](#创建-slack-app)的说明，将机器人邀请到 director 频道，并在启动 `takt daemon` 的 shell 中设置这两个变量。令牌只通过环境变量传递，不写入配置文件。修改 Slack 配置后，请重新启动 daemon。
+
+获准用户在 director 频道中的发言会进入 director 对话，不会进入 manager 对话。director 在原消息的消息列中回复。不在 `director.slack.allowed_user_ids` 中的用户发言会被忽略。即使 manager 使用同一频道，普通发言仍交给 director；manager 的询问按钮和对话框操作则使用 `manager.slack.allowed_user_ids`。
+
+director 将一轮中新产生的通知汇总为该频道中的一条消息，包括已完成的工作，以及合并审批、未回答的询问等需要人工决定的事项。被现有去重机制抑制的通知不会重复发布。未配置 `director.slack` 时，director 不会向 Slack 发布消息，也不接受 Slack 发言。连接需要同时设置两个令牌环境变量。现有的 `TAKT_NOTIFY_WEBHOOK` 通知路径不变。
+
+## manager 敏感文件设置
+
+`manager.sensitive_paths` 和 `provider.targets.internal_agents.manager-permission-judge` 已弃用并被忽略。保留旧配置不会导致启动失败，但这些设置不再保护文件或决定工具执行权限。manager 按照 facets 处理人的指令和秘密值，不再读取权限 Markdown。
 
 ## API Key 配置
 
-TAKT 支持 Claude、Codex、OpenCode、Pi、官方 DeepSeek Harness SDK、Cursor、Copilot 和 Kiro provider。Claude/Codex/OpenCode 使用各自 SDK credential，Pi 使用 Pi SDK credential store 或 provider 原生环境变量，DeepSeek Harness 先通过 `takt install deepseek-harness` 安装 TypeScript SDK/runtime，再通过官方 credential store（`$DSH_HOME/.credentials.yaml`，默认 `~/.dsh/.credentials.yaml`）或 `DEEPSEEK_API_KEY` 认证，Cursor 支持 API key 或已有 `cursor-agent login` session，Copilot 使用 GitHub token，Kiro 使用 API key。
+TAKT 支持 Claude、Codex、OpenCode、Pi、官方 DeepSeek Harness SDK、Cursor、Copilot、Kiro 和 Devin provider。Claude/Codex/OpenCode 使用各自 SDK credential，Pi 使用 Pi SDK credential store 或 provider 原生环境变量，DeepSeek Harness 先通过 `takt install deepseek-harness` 安装 TypeScript SDK/runtime，再通过官方 credential store（`$DSH_HOME/.credentials.yaml`，默认 `~/.dsh/.credentials.yaml`）或 `DEEPSEEK_API_KEY` 认证，Cursor 支持 API key 或已有 `cursor-agent login` session，Copilot 使用 GitHub token，Kiro 使用 API key。
 
 全局配置 schema 还保留了一些当前不能作为顶层 provider 选择的 legacy 或 provider integration API key 字段。这些字段本身不会启用 provider；请根据所选 provider，使用下文记录的认证环境变量或配置 key。
 
@@ -558,12 +731,13 @@ kiro_api_key: ...              # Kiro CLI
 | Cursor Agent | `TAKT_CURSOR_API_KEY` | `cursor_api_key` |
 | GitHub Copilot CLI | `TAKT_COPILOT_GITHUB_TOKEN` | `copilot_github_token` |
 | Kiro CLI | `TAKT_KIRO_API_KEY`（`KIRO_API_KEY` fallback） | `kiro_api_key` |
+| Devin CLI | `devin auth login` 凭据存储 | - |
 
 如果将 API key 写入配置文件，请勿将该文件 commit 到 Git；更推荐环境变量，并可将 `~/.takt/config.yaml` 加入全局 `.gitignore`。
 
 ### 安全
 
-TAKT 不读取、复制或改写保存的 DeepSeek credential 值。DeepSeek Harness TypeScript SDK/runtime 支持 glibc >= 2.28 的 Linux x64/arm64 和 macOS arm64 >= 14.0。Cursor 已有 `cursor-agent login` session 时可以不设置 API key；Copilot 和 Kiro 仍需各自的 CLI。
+TAKT 不读取、复制或改写保存的 DeepSeek credential 值。DeepSeek Harness TypeScript SDK/runtime 支持 glibc >= 2.28 的 Linux x64/arm64 和 macOS arm64 >= 14.0。Cursor 已有 `cursor-agent login` session 时可以不设置 API key；Copilot、Kiro 和 Devin 仍需各自的 CLI。Devin provider 需要安装 `devin` CLI 并通过 `devin auth login` 认证；TAKT 不向子进程传递凭据，但 `WINDSURF_API_KEY` 环境变量在已设置时会转发给子进程。
 
 ### CLI 路径覆盖
 
@@ -573,6 +747,7 @@ export TAKT_CODEX_CLI_PATH=/usr/local/bin/codex
 export TAKT_CURSOR_CLI_PATH=/usr/local/bin/cursor-agent
 export TAKT_COPILOT_CLI_PATH=/usr/local/bin/github-copilot-cli
 export TAKT_KIRO_CLI_PATH=/usr/local/bin/kiro-cli
+export TAKT_DEVIN_CLI_PATH=/usr/local/bin/devin
 ```
 
 ```yaml
@@ -582,6 +757,7 @@ codex_cli_path: /usr/local/bin/codex
 cursor_cli_path: /usr/local/bin/cursor-agent
 copilot_cli_path: /usr/local/bin/github-copilot-cli
 kiro_cli_path: /usr/local/bin/kiro-cli
+devin_cli_path: /usr/local/bin/devin
 ```
 
 路径必须是可执行文件的绝对路径。CLI 路径覆盖只属于全局配置，不要写入项目 `.takt/config.yaml`。
@@ -599,6 +775,7 @@ kiro_cli_path: /usr/local/bin/kiro-cli
 - **Cursor Agent** 将 model 原样传给 `cursor-agent --model <model>`。
 - **GitHub Copilot CLI** 将 model 原样传给 `copilot --model <model>`。
 - **Kiro CLI** 将 model 原样传给 `kiro-cli chat --model <model>`。
+- **Devin CLI** 将 model 传给 `devin acp --model <model>`（例如 `swe-2-max`、`swe-2-high`、`swe-2-medium`）；ACP session 会把该名称解析为 `model` 与 `thought_level` 配置项，无法解析或应用的名称会立即报错，而不是静默回退到默认值。该校验仅适用于新建 session；恢复的 session 保留创建时使用的 model，不会重新解析所指定的名称。省略时使用用户 Devin config 中配置的默认 model。
 
 ### 示例
 
@@ -612,7 +789,7 @@ workflow 的 `promotion` 只能推进 `runtime.yaml` 选择的 target ladder，�
 
 ### OpenCode v1/v2 选择
 
-OpenCode provider 会启动外部 `opencode serve` CLI，并通过 SDK 连接到该服务；仅配置 API key 不足以运行。默认使用 v2（`@opencode/client` 和 `@opencode/plugin` 2.0.18）。如需使用 v1（`@opencode-ai/sdk` 1.18.28），请显式设置 `TAKT_OPENCODE_VERSION=v1`。已验证的 CLI 版本分别为 v1 1.18.2 和 v2 2.0.18；TAKT 会在启动前拒绝与所选版本不匹配的 CLI。`TAKT_OPENCODE_PATH` 可指定 CLI 命令名或路径，未设置时使用 `PATH` 中的 `opencode`。版本和路径设置适用于整个 TAKT 进程；切换版本后请启动新的 run。
+OpenCode provider 会启动外部 `opencode serve` CLI，并通过 SDK 连接到该服务；仅配置 API key 不足以运行。默认使用 v2（`@opencode/client` 和 `@opencode/plugin` 2.2.5）。如需使用 v1（`@opencode-ai/sdk` 1.18.28），请显式设置 `TAKT_OPENCODE_VERSION=v1`。已验证的 CLI 版本分别为 v1 1.18.2 和 v2 2.0.18，并已验证 client/plugin 2.2.5 与 v2 CLI 2.0.18 组合下的服务器启动和基本 prompt/tool 调用；TAKT 会在启动前拒绝与所选版本不匹配的 CLI。`TAKT_OPENCODE_PATH` 可指定 CLI 命令名或路径，未设置时使用 `PATH` 中的 `opencode`。版本和路径设置适用于整个 TAKT 进程；切换版本后请启动新的 run。
 
 ```sh
 TAKT_OPENCODE_VERSION=v1 TAKT_OPENCODE_PATH=/path/to/opencode-v1 takt run
@@ -694,8 +871,6 @@ provider:
       selector:
         profile: router
       review-completion-judge:
-        profile: router
-      manager-permission-judge:
         profile: router
 
   auto_routing:
@@ -851,7 +1026,7 @@ defaults
   < steps
 ```
 
-内部 `selector`、`assistant`、`loop-judge`、`review-completion-judge` 和 `manager-permission-judge` 使用单独的解析顺序。`manager-permission-judge` 在 manager 使用 claude（claude-sdk）或 codex provider 的对话中，负责工具执行前的权限审查。可通过 `runtime.yaml` 中的 `provider.targets.internal_agents.manager-permission-judge` 指定其 provider 和 model，使用 `profile` 或 `ladder`，不能使用 `pool`。所有 seat 都是可选的；未分配时使用普通默认解析。不过，`manager-permission-judge` 未分配时使用与 manager 相同的 provider、model 和 provider options：
+内部 `selector`、`assistant`、`loop-judge` 和 `review-completion-judge` 使用单独的解析顺序。`selector` 选择动态工作，`assistant` 支持交互会话，`loop-judge` 判断 loop monitor，`review-completion-judge` 判断已启用的 reviewer 是否需要再次审查。各 seat 都可省略，未指定时使用普通默认解析。已废弃的 `manager-permission-judge` 会被忽略。
 
 ```text
 defaults
@@ -897,11 +1072,15 @@ Provider profile 可以为不同 provider 设置默认权限模式和按 step �
 
 ### 权限模式
 
-| 模式 | 说明 | Claude | Codex | OpenCode | Pi | DeepSeek Harness | Cursor Agent | Copilot | Kiro CLI |
-|------|------|--------|-------|----------|----|------------------|--------------|---------|----------|
-| `readonly` | 只读，不修改文件 | `default` | `read-only` | `read-only` | `read`、`grep`、`find`、`ls`、`codemode` | 此 SDK 不提供 | 默认 flags（无 `--force`） | 无权限 flags | `--trust-tools=read,grep` |
-| `edit` | 允许带确认的文件编辑 | `acceptEdits` | `workspace-write` | `workspace-write` | `read`、`grep`、`find`、`ls`、`edit`、`write`、`bash`、`codemode` | 此 SDK 不提供 | 默认 flags（无 `--force`） | `--allow-all-tools --no-ask-user` | `--trust-tools=read,grep,write,shell` |
-| `full` | 绕过所有权限检查 | `bypassPermissions` | `danger-full-access` | `danger-full-access` | 所有注册 Pi 工具 | 此 SDK 不提供 | `--force` | `--yolo` | `--trust-all-tools` |
+| 模式 | 说明 | Claude | Codex | OpenCode | Pi | DeepSeek Harness | Cursor Agent | Copilot | Kiro CLI | Devin CLI |
+|------|------|--------|-------|----------|----|------------------|--------------|---------|----------|-----------|
+| `readonly` | 只读，不修改文件 | `default` | `read-only` | `read-only` | `read`、`grep`、`find`、`ls`、`codemode` | 此 SDK 不提供 | 默认 flags（无 `--force`） | 无权限 flags | `--trust-tools=read,grep` | `ask` ACP session mode + 生成的 `--config` deny 规则（`exec`、`edit`、`Write(**)`、`mcp__*`） |
+| `edit` | 允许带确认的文件编辑 | `acceptEdits` | `workspace-write` | `workspace-write` | `read`、`grep`、`find`、`ls`、`edit`、`write`、`bash`、`codemode` | 此 SDK 不提供 | 默认 flags（无 `--force`） | `--allow-all-tools --no-ask-user` | `--trust-tools=read,grep,write,shell` | `accept-edits` ACP session mode + 生成的 `--config` allow 规则（`exec`、`edit`、`Write(**)`） |
+| `full` | 绕过所有权限检查 | `bypassPermissions` | `danger-full-access` | `danger-full-access` | 所有注册 Pi 工具 | 此 SDK 不提供 | `--force` | `--yolo` | `--trust-all-tools` | `bypass` ACP session mode；permission 请求以 `allow_once` 应答 |
+
+Devin 通过 `devin acp`（基于 stdio 的 Agent Client Protocol）而不是 print 模式运行，因此权限模式分三层实施：用 `session/set_mode` 设置的 ACP session mode（`readonly` 对应 `ask`，`edit` 和未设置对应 `accept-edits`，`full` 对应 `bypass`）、追加到以用户 Devin 配置（`$XDG_CONFIG_HOME/devin/config.json`，默认 `~/.config/devin/config.json`；Windows 为 `%APPDATA%\devin\config.json`）为基础生成的 `--config` 中的 permission 规则，以及对 `session/request_permission` 的应答——对送达 TAKT 的请求，只有 `full` 模式选择 `allow_once`，`allow_always` 因会把决定持久化到 Devin config 而从不被选择。`strict-readonly` 内部 agent 隔离还会额外 deny `Fetch(**)`。
+
+生成的 `--config` 只替换 Devin 的用户级配置。仓库内项目级 `.devin/config.json`（以及 `.devin/config.local.json`）在 Devin 中优先级更高，其 `permissions.allow` 规则会在 Devin 向 TAKT 发起权限请求之前预先批准 tool 调用。实测：在 `edit` 模式或未设置权限模式时，仓库 `.devin/config.json` 中的 `allow: ["exec", ...]` 让一条本应被 TAKT 拒绝的 shell 命令得以执行。`readonly` 和 `strict-readonly` 不受影响（ACP `ask` 模式不暴露 write/exec 工具），且对于 TAKT 发出的规则，TAKT 的 `deny` 规则仍优先于项目的 `allow` 规则。在不受信任的仓库上运行 `edit` 模式的 Devin step 之前，请先检查该仓库的 `.devin/config.json`。
 
 Pi 的权限模式是 SDK active-tool allowlist，而不是操作系统 sandbox；TAKT 不为 Pi 增加逐工具确认。使用 Pi 时请确保 workflow 输入和 extension 可信。
 
@@ -1143,7 +1322,7 @@ SDK 不提供此 provider 所需的 permission control，因此请求 permission
 
 旧版 Python/uv 管理文件和 `takt deepseek-harness install` 不再使用。TAKT 不会迁移或删除用户文件。如需删除旧 managed environment，请先检查再手动处理；`~/.dsh` credential store 仍由用户管理。
 
-默认交互会话使用 SDK 标准工具；显式 allowlist（包括 `[]`）仍不受支持。report/status phase 保留禁用工具的空 allowlist，在 resume、新 session 重试及 DeepSeek fallback 路径中均会在 SDK 启动前拒绝。这是在执行前防止工具副作用，而不是执行后才检测。请为这些 phase 使用兼容的 provider。
+默认交互会话使用 SDK 标准工具；显式 allowlist（包括 `[]`）仍不受支持。report phase 使用只读工具，status phase 使用禁用工具的空 allowlist；这些限制在 resume、新 session 重试及 DeepSeek fallback 路径中均会在 SDK 启动前拒绝。这是在执行前防止工具副作用，而不是执行后才检测。请为这些 phase 使用兼容的 provider。
 
 persona 的 first-step 信息将未声明工具保留为 `undefined`，与显式 `[]` 区分；空和非空的显式列表都会传到 DeepSeek guard。DeepSeek 交互失败不使用通用 stale-session retry。拒绝限制时可保留仍运行的 session；遇到 `session_continuation_unsupported` 时则清除保存 ID，并说明下一个用户 turn 将创建没有旧历史的新 SDK session。历史恢复仍等待 SDK 支持，因此允许 ID 改变。不会静默重跑被拒绝的 turn，也不会放宽限制；workflow 继续执行仍需新的 TAKT session/run。
 
@@ -1159,6 +1338,8 @@ provider_options:
     network_access: true
 ```
 
+在 TAKT 管理权限的 Phase 1 中，可以保持文件只读并允许网络访问，适用于 `edit: false` 或解析为 `permission_mode: readonly` 的调用。使用 `permission_control: codex` 时，应在 Codex 中配置网络。Phase 2 和以 `strict-readonly` 运行的 TAKT 内部调用（例如隔离的结构化调用）始终使用 `read-only` sandbox，并禁用网络访问，即使设置 `network_access: true` 也不例外。
+
 OpenCode 通过 `webfetch` / `websearch` 工具权限实现同一抽象：
 
 ```yaml
@@ -1172,7 +1353,16 @@ provider_options:
 
 #### Codex 权限控制（`permission_control`）
 
-Codex 默认使用 TAKT 的权限映射，相当于 `permission_control: takt`，并将解析出的 TAKT `permission_mode` 传给 Codex SDK 的 `sandboxMode`。设置 `network_access` 时也会传入 `networkAccessEnabled`；省略时 Codex 保持默认 `false`。
+Codex 默认由 TAKT 管理权限，相当于 `permission_control: takt`。写入权限与 `network_access` 分开解析。Phase 1 中，`edit: false` 或解析出的 `permission_mode: readonly` 会禁止写入；即使 `permission_mode: full`，`edit: false` 仍然优先。
+
+| 写入权限 | `network_access` | 传给 Codex 的设置 |
+|---|---|---|
+| 允许 | `true` | `workspace-write` sandbox（`full` 使用 `danger-full-access`）及 `networkAccessEnabled: true` |
+| 允许 | `false` / 未指定 | 保持原有 sandbox 映射；显式传递 `false`，省略时保留 Codex 默认值 |
+| 禁止 | `true` | 不传 sandbox 标志；通过 `--config` 传递继承 `:read-only` 且设置 `network.enabled=true` 的 `takt-readonly-network` 权限 profile |
+| 禁止 | `false` / 未指定 | `read-only` sandbox |
+
+TAKT 管理权限时，会为所有 `codex exec` 添加 `--ignore-rules`，包括可写 step、新 session 和 `exec ... resume <id>`。因此 Codex 不会加载用户或项目的 execpolicy `.rules` 文件，避免 allow 规则让匹配的命令在 sandbox 外执行。使用 `permission_control: codex` 时，规则由用户配置决定，但 Phase 2 和以 `strict-readonly` 运行的 TAKT 内部调用（例如隔离的结构化调用）例外。Phase 2、这些内部调用和仅允许 MCP 副作用的模式始终添加 `--ignore-rules`，并禁止写入和网络访问。Phase 2 或这些内部调用指定 `config_profile` 时，同时传递 `--ignore-rules` 和 `--profile <name>`。辅助命令 `mcp list` / `mcp get` 不会收到 exec 专用标志。
 
 ```yaml
 provider_options:
@@ -1185,7 +1375,9 @@ provider_options:
       repo: true
 ```
 
-使用 `permission_control: codex` 时，TAKT 从每次 Codex 调用（包括 strict isolated structured 调用）中省略 `sandboxMode` 和 `networkAccessEnabled`，由 Codex 的 `config.toml`、`default_permissions` 和 permission profile 决定实际权限。无论 `network_access` 来自 capability、runtime profile、routing、项目或全局配置，还是环境变量覆盖，解析后的值都会被接受且不会产生警告，但不会用于这些 Codex 权限字段。非交互执行仍会设置 `approvalPolicy: never`，`reasoning_effort`、`fast_mode`、`skills` 等非权限控制选项也会继续生效。
+Phase 1 使用 `permission_control: codex` 时，TAKT 从未使用 `strict-readonly` 的 Codex 调用中省略 `sandboxMode` 和 `networkAccessEnabled`，由 Codex 的 `config.toml`、`default_permissions` 和 permission profile 决定实际权限。无论 `network_access` 来自 capability、runtime profile、routing、项目或全局配置，还是环境变量覆盖，解析后的值都会被接受且不会产生警告，但不会用于这些 Codex 权限字段。非交互执行仍会设置 `approvalPolicy: never`，`reasoning_effort`、`fast_mode`、`skills` 等非权限控制选项也会继续生效。
+
+Phase 1 使用 `permission_control: codex` 时，即使设置 `edit: false` 或 `permission_mode: readonly`，TAKT 也不传 sandbox 和网络覆盖，由 Codex 配置决定实际权限，未使用 `strict-readonly` 的结构化调用同样适用。Phase 2 和以 `strict-readonly` 运行的 TAKT 内部调用（例如隔离的结构化调用）是例外：即使委托权限，TAKT 仍管理这些调用的权限，始终传递 `read-only` sandbox 和 `networkAccessEnabled: false`。仅允许 MCP 副作用的模式也保持 `read-only` sandbox，并显式禁用网络和 Web 搜索；该模式不能与 `permission_control: codex` 同时使用。
 
 要按名称选择 Codex 配置 profile，请在 `permission_control: codex` 下设置 `config_profile`：
 
@@ -1235,6 +1427,39 @@ provider_options:
     sandbox:
       allow_unsandboxed_commands: true
 ```
+
+<a id="claude-read-deny-rules"></a>
+
+#### Claude Code 读取拒绝规则（`permissions`）
+
+要让由 TAKT 启动的 Claude 应用 `permissions.deny` 规则（例如 `Read(./.env)`），请通过 `provider_options.claude.permissions` 向 Claude 传递这些规则：
+
+```yaml
+provider_options:
+  claude:
+    permissions:
+      deny:
+        - "Read(./.env)"
+        - "Read(~/.ssh/**)"
+      import_user_read_deny: true
+```
+
+| 键 | 类型 | 默认值 | 含义 |
+|----|------|--------|------|
+| `deny` | 非空字符串列表 | 无 | 写在 TAKT 配置中的规则，按原样传给 Claude，因此不限于 `Read(` 规则。 |
+| `import_user_read_deny` | boolean | `false` | 为 `true` 时，还会从 `~/.claude/settings.json` 的 `permissions.deny` 导入以 `Read(` 开头（区分大小写）的规则。Bash 规则、MCP 规则和其他规则不会导入。 |
+
+- `Read(` 规则拦截的范围由 Claude Code 决定，而不是由 TAKT 决定。
+  根据 [Claude Code 权限文档](https://code.claude.com/docs/en/permissions)，这些规则适用于 Claude 的内置文件工具（Claude 会尽力将 `Read` 规则应用于 Grep、Glob 等工具），以及 Claude Code 在 Bash 中识别的文件命令，如 `cat`、`head`、`tail`、`sed` 和 `tee`。
+  它们不适用于不指定文件名就读取文件的命令（如 `grep -r pattern .`），也不适用于自行打开文件的脚本（如 Python 或 Node 脚本）。
+  要在操作系统层面阻止 Claude 在 sandbox 中运行的 shell 命令及其启动的进程访问某个路径，请先为该路径添加 `Read(` 拒绝规则，再启用带文件系统隔离的 [Claude Code sandbox](https://code.claude.com/docs/en/sandboxing.md)。不要将 `sandbox.filesystem.disabled` 设为 `true`，因为这会让 sandbox 中的命令能够读取主机文件。通过 `excludedCommands` 匹配或通过 `allow_unsandboxed_commands` 在 sandbox 外运行的命令不受此限制。
+  没有拒绝规则的路径，sandbox 中的进程仍然可以读取。
+  hooks、MCP server 等在 sandbox 之外运行的进程不会被阻止。
+- Claude 收到的规则是 `deny` 与导入规则的并集，重复项只保留一条。TAKT 将其作为 Claude flag settings 的 `permissions.deny` 传递（`claude-sdk` 使用 SDK 的 `settings` 选项，`claude-headless` 使用 `--settings`），因此对状态判定等隔离的内部调用同样有效。
+- 适用于 `claude-sdk`（包括别名 `claude`）和 `claude-headless`，覆盖 workflow step、内部调用和交互式 assistant。`claude-terminal` 不会收到这些规则，也不会触发下述警告。
+- 用户设置文件固定为当前用户主目录下的 `~/.claude/settings.json`，不会参考 `CLAUDE_CONFIG_DIR`。仅当 `import_user_read_deny` 为 `true` 时才读取，每次启动 Claude 都会读取。两个键都未设置时不读取文件，Claude 的启动参数也与以前相同。
+- 文件不存在、无法读取、不是有效 JSON，或 `permissions`、`permissions.deny` 的类型不对时，TAKT 会输出警告，并只用 `deny` 中的规则启动 Claude。文件可读但没有 `Read(` 规则时，不导入任何内容，也不输出警告。`permissions.deny` 中不是字符串的元素会被忽略。
+- 两个键与其他 `provider_options` leaf 使用相同的层级和覆盖规则。上层会整体替换 `deny` 列表，不会拼接。环境变量为 `TAKT_PROVIDER_OPTIONS_CLAUDE_PERMISSIONS_DENY`（JSON 数组）和 `TAKT_PROVIDER_OPTIONS_CLAUDE_PERMISSIONS_IMPORT_USER_READ_DENY`。
 
 #### Pi 资源加载（`extensions`、`no_*`）
 
@@ -1414,6 +1639,7 @@ Companion 的 structured call 使用和其他 TAKT-owned structured agent 一样
 | `mock` | 取决于 scenario |
 | `opencode` | Live |
 | `pi` | Live |
+| `devin` | Live |
 | `cursor`、`copilot`、`kiro` | 不可用 |
 
 当 live tool event 不可用时，完成审查和 turn 边界的 finding 传递仍会运行。
@@ -1440,7 +1666,7 @@ takt update codex     # 仅更新指定提供者
 
 GitLab 支持 MR 详情、CI 状态获取和批量选择。启用 Caccia 时，在 `takt merge` 和 `from_pr` 任务中，Caccia effect 返回原因是 `github_unavailable` 的 `skipped`，然后等待返回 head 的 CI。合并结果 pipeline 通过合并提交的第二个父提交与 source head 的一致性进行验证。没有 pipeline 或 pipeline 对应旧 head 时不会通过 CI。指定合并方式和限制 head 仍不受支持，传入这些参数的 `merge_pr` 会失败。CI 等待完成不代表合并成功。
 
-默认的 `merge.workflow` 是 `merge-review-fix-simple`：由一个只读审查代理审查，再由独立步骤裁定问题、规划和实施修复、验证并重新审查。设置为 `merge-review-fix` 可使用并行审查；命令行 `--workflow` 优先于该设置。
+默认的 `merge.workflow` 是 `merge-review-fix-simple`：先同步 PR 与 base 分支；无冲突时跳过完整审查，直接进入 push → Caccia → CI 等待；AI 解决冲突后则由一个只读审查代理审查，再由独立步骤裁定问题、规划和实施修复、验证并重新审查，然后进入同一 push、Caccia 和 CI 流程。初次同步和重新同步均遵循此条件。设置为 `merge-review-fix` 可使用并行审查；命令行 `--workflow` 优先于该设置。manager 调用 `takt_merge_goal_pr` 且指定 `until: prepare` 时使用 `merge.prepare_workflow`（默认 `merge-prepare`）；`until: merge` 和 `takt merge` 仍使用 `merge.workflow`，此设置不改变 CLI 的 workflow 选择。默认的 `merge-prepare` 使用相同的同步、条件审查、push、Caccia 和 CI 流程，随后正常结束，等待人工合并。
 
 `takt merge` 批量处理默认同时运行 2 个 PR workflow。可以在项目或全局配置中设置正的安全整数；项目级 `merge` 配置块优先于全局配置块。命令行 `--concurrency` 优先于配置。根级 `concurrency` 只控制 `takt run` 和 `takt watch`。指定 PR 编号时只处理该 PR。
 
@@ -1449,3 +1675,11 @@ merge:
   workflow: merge-review-fix-simple
   concurrency: 2
 ```
+
+## manager 目标与形式规格
+
+`assistant.formal_spec` 也适用于 manager 的目标注册提案。manager 不会在每次注册时询问：`true` 和 `"Y/n"` 包含 Quint 和 Alloy，`false` 和 `"y/N"` 则不包含。项目配置优先于全局配置，object 中各字段独立解析。`comments` 和 `model_check_timeout_seconds` 与交互模式使用相同设置。
+
+开发和实现目标使用 Gherkin 描述误解后会改变实现结果的重要可观察行为，不在验收条件中重复相同的预期结果。Gherkin 关键字使用英语，描述可以使用对话语言。研究、文档、运维等不以实现为交付物的目标不使用 Gherkin。
+
+在 TUI 或 Slack 的 manager 对话中输入 `/verify`，即可根据当前共识生成 Quint 和 Alloy 规格，并使用与交互模式相同的检查器验证。结果返回同一对话，由 manager 解释诊断信息与反例。禁用形式规格时会提示该命令不可用。注册前不会自动验证；仅验证不会注册目标，也不会修改注册提案或已保存的规格。

@@ -105,9 +105,11 @@ const mockListAllTaskItems = vi.fn();
 const mockIsStaleRunningTask = vi.fn();
 const mockCheckoutBranch = vi.fn();
 vi.mock('../infra/task/index.js', () => ({
-  TaskRunner: vi.fn(() => ({
-    listAllTaskItems: mockListAllTaskItems,
-  })),
+  TaskRunner: vi.fn(function () {
+    return {
+      listAllTaskItems: mockListAllTaskItems,
+    };
+  }),
   isStaleRunningTask: (...args: unknown[]) => mockIsStaleRunningTask(...args),
   checkoutBranch: (...args: unknown[]) => mockCheckoutBranch(...args),
   materializePullRequestBase: vi.fn((_projectCwd, _targetCwd, baseBranch: string) =>
@@ -117,6 +119,8 @@ vi.mock('../infra/task/index.js', () => ({
 
 vi.mock('../infra/config/index.js', () => ({
   getWorkflowDescription: mockGetWorkflowDescription,
+  loadGlobalConfig: () => ({}),
+  loadProjectConfig: () => ({}),
   resolveConfigValues: (...args: unknown[]) => mockResolveConfigValues(...args),
   resolveConfigValue: vi.fn(() => undefined),
   loadPersonaSessions: mockLoadPersonaSessions,

@@ -1,7 +1,9 @@
+type ManifestOverrideValue = string | Record<string, string>;
+
 interface StartupManifest {
   dependencies: Record<string, string>;
   bundleDependencies: string[];
-  overrides?: Record<string, string>;
+  overrides?: Record<string, ManifestOverrideValue>;
 }
 
 interface StartupLock {
@@ -10,6 +12,7 @@ interface StartupLock {
     dependencies?: Record<string, string>;
     devDependencies?: Record<string, string>;
     peerDependencies?: Record<string, string>;
+    peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   }>;
 }
 
@@ -21,10 +24,10 @@ interface DeepSeekRootManifest extends StartupManifest {
 
 interface DeepSeekManagedManifest {
   dependencies: Record<string, string>;
-  overrides?: Record<string, string>;
+  overrides?: Record<string, ManifestOverrideValue>;
 }
 
-/** Verify pinned development/managed SDK graphs and throw on version, peer, or shipping inconsistencies. */
+/** Verify the managed SDK graph and reject root DeepSeek dependencies or version, peer, and shipping inconsistencies. */
 export function verifyDeepSeekManagedLock(
   root: DeepSeekRootManifest,
   rootLock: StartupLock,

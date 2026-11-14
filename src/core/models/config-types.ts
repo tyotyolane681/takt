@@ -17,6 +17,8 @@ export type RoutingTier = 'high' | 'medium' | 'low';
 export const MANAGER_NOTIFICATION_KINDS = ['question', 'awaiting_merge', 'completed', 'progress', 'blocked', 'custom'] as const;
 export type ManagerNotificationKind = typeof MANAGER_NOTIFICATION_KINDS[number];
 export type ManagerNotifications = Partial<Record<ManagerNotificationKind, boolean>>;
+export type ManagerPermission = 'auto' | 'full';
+export type ManagerWorkflowsConfig = 'all' | (string | Record<string, string>)[];
 export type AutoRoutingStrategy = 'cost' | 'balanced' | 'performance';
 
 export interface AutoRoutingCandidate {
@@ -92,8 +94,6 @@ export interface InternalAgentSeats {
   loopJudge?: ProviderRoutingEntry;
   /** `review-completion-judge`: completion-retry episode の網羅性判定役。 */
   completionRetryJudge?: ProviderRoutingEntry;
-  /** `manager-permission-judge`: manager の道具の使用を審査する判断役。 */
-  managerPermissionJudge?: ProviderRoutingEntry;
 }
 
 export interface ProviderRoutingConfig {
@@ -284,6 +284,7 @@ export type MergeMethod = 'squash' | 'merge' | 'rebase';
 
 export interface MergeSettings {
   workflow: string;
+  prepareWorkflow: string;
   method: MergeMethod;
   concurrency: number;
   autoStart: boolean;
@@ -304,6 +305,11 @@ export interface WorkflowRuntimePrepareConfig {
 /** Workflow-level command quality gate policy */
 export interface WorkflowCommandGatesConfig {
   /** Allow command gates from workflow YAML (default: false) */
+  customScripts?: boolean;
+}
+
+/** Workflow-level system command input policy */
+export interface WorkflowSystemCommandsConfig {
   customScripts?: boolean;
 }
 
@@ -361,7 +367,8 @@ export interface NotificationSoundEventsConfig {
  * Project-level configuration stored in .takt/config.yaml.
  */
 export interface ProjectConfig {
-  manager?: { autoRun?: boolean; patrolInterval?: number; defaultWorkflow?: string; mainMerge?: 'auto' | 'approve'; notifications?: ManagerNotifications; sensitivePaths?: string[] };
+  manager?: { permission?: ManagerPermission; providerPermissions?: Record<string, ManagerPermission>; patrolInterval?: number; autoRun?: boolean; preserveGoalWorktree?: boolean; workflows?: ManagerWorkflowsConfig; mainMerge?: 'auto' | 'approve'; notifications?: ManagerNotifications;
+    slack?: { channelId: string; allowedUserIds: string[] } };
   /** UI / builtin resource language override for this project */
   language?: Language;
   /** Provider selection for agent runtime */
@@ -435,6 +442,7 @@ export interface ProjectConfig {
   workflowRuntimePrepare?: WorkflowRuntimePrepareConfig;
   /** Workflow-level command quality gate policy */
   workflowCommandGates?: WorkflowCommandGatesConfig;
+  workflowSystemCommands?: WorkflowSystemCommandsConfig;
   /** Workflow-level Arpeggio policy */
   workflowArpeggio?: WorkflowArpeggioConfig;
   /** Sync conflict resolver behavior */
@@ -451,7 +459,9 @@ export interface ProjectConfig {
  * — handled by the resolution layer.
  */
 export interface GlobalConfig extends Omit<ProjectConfig, 'submodules' | 'withSubmodules' | 'assistant' | 'manager'> {
-  manager?: { autoRun?: boolean; patrolInterval?: number; defaultWorkflow?: string; notifications?: ManagerNotifications; sensitivePaths?: string[] };
+  /** @globalOnly */
+  director?: { slack?: { channelId: string; allowedUserIds: string[] } };
+  manager?: { permission?: ManagerPermission; providerPermissions?: Record<string, ManagerPermission>; patrolInterval?: number; autoRun?: boolean; preserveGoalWorktree?: boolean; workflows?: ManagerWorkflowsConfig; notifications?: ManagerNotifications };
   /** Global default for assistant task-instruction formatting. */
   assistant?: GlobalAssistantConfig;
   /** @globalOnly */
@@ -499,6 +509,9 @@ export interface GlobalConfig extends Omit<ProjectConfig, 'submodules' | 'withSu
   /** @globalOnly */
   /** External Kiro CLI path (overridden by TAKT_KIRO_CLI_PATH env var) */
   kiroCliPath?: string;
+  /** @globalOnly */
+  /** External Devin CLI path (overridden by TAKT_DEVIN_CLI_PATH env var) */
+  devinCliPath?: string;
   /** @globalOnly */
   /** Copilot GitHub token (overridden by TAKT_COPILOT_GITHUB_TOKEN env var) */
   copilotGithubToken?: string;

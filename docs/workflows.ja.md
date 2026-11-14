@@ -209,6 +209,7 @@ steps:
 | `{user_inputs}` | workflow 中に追加で得たユーザー入力（テンプレートに無ければ自動注入） |
 | `{report_dir}` | レポートディレクトリのパス (例: `.takt/runs/20250126-143052-task-summary/reports`) |
 | `{report:filename}` | [レポート参照の探索](#レポート参照の探索)に従って本文を埋め込む |
+| `{report_history:filename}` | 宣言した `history: {previous: N}` の固定パスを古い順に示す一覧。過去本文は展開しない |
 | `{review_scope}` | TAKT が算出した、このタスクの変更ファイル一覧 |
 
 `{review_scope}` は実行の由来によって対象が変わります。
@@ -773,7 +774,7 @@ step が別の workflow を名前で呼び出します。子 workflow は同じ 
 
 system step は TAKT エンジン自身が実行する step で、agent は起動しません。`kind: system`（または短縮形の `mode: system`。両方の宣言は設定エラー）で宣言します。system step には `persona`、`instruction`、`provider`、`structured_output`、`output_contracts`、`quality_gates` などの agent 用フィールドを宣言できません。完全なスキーマは `src/core/models/workflow-system-schemas.ts` を参照してください。builtin の `auto-improvement-loop` workflow（`builtins/ja/workflows/auto-improvement-loop.yaml`）が参考実装で、system step と planner agent step だけで PR 対応・Issue 駆動計画・新規改善計画の間をルーティングします。
 
-`system_inputs` はエンジンが提供するコンテキストを読み取り、各エントリを `as` で名前に束縛します。利用できる type は `task_context`、`branch_context`、`pr_context`、`issue_context`、`task_queue_context`、`pr_list`、`pr_selection`、`issue_list`、`issue_selection` です（`pr_list` / `pr_selection` は `where` フィルタを受け取り、両者の `where` は一致している必要があります）。binding 名は step 内で一意でなければなりません。束縛した値は `context.<step>.<binding>...` として `when()` rule を駆動し、後続の agent instruction からは `{context:step.binding.field}` で参照できます。
+`system_inputs` はエンジンが提供するコンテキストの読み取りや固定コマンドの実行を行い、各エントリを `as` で名前に束縛します。利用できる type は `task_context`、`branch_context`、`pr_context`、`issue_context`、`task_queue_context`、`pr_list`、`pr_selection`、`issue_list`、`issue_selection`、`pr_status`、`pr_ci_failure`、`command` です（`pr_list` / `pr_selection` は `where` フィルタを受け取り、両者の `where` は一致している必要があります）。`command` の実行には許可設定が必要です。詳細は[固定コマンドの input](#固定コマンドの-input)を参照してください。binding 名は step 内で一意でなければなりません。束縛した値は `context.<step>.<binding>...` として `when()` rule を駆動し、後続の agent instruction からは `{context:step.binding.field}` で参照できます。
 
 ```yaml
   - name: route_context
@@ -792,6 +793,57 @@ system step は TAKT エンジン自身が実行する step で、agent は起�
       - condition: when(context.route_context.selected_pr.exists == true)
         next: plan_from_existing_pr
 ```
+
+#### 固定コマンドの input
+
+`type: command`はworkflowに固定した文字列をshellで実行します。以下の許可設定は既定で無効です。projectの明示値はglobalより優先され、projectで未指定の場合はglobalの値を使います。`workflow_command_gates.custom_scripts`とは独立し、無許可のworkflowは読み込み時に拒否されます。
+
+別cloneでも元のproject設定を使います。各実行で許可を解決し、rootと子workflowへ同じ値を渡します。`wait`では設定を読み直しません。詳細は[設定ガイド](configuration.ja.md)を参照してください。
+
+pipeline または対話モードが現在のディレクトリに PR をチェックアウトする場合は、切り替え前の設定から許可を決めます。対話セッションでは Issue に切り替えた後も同じディレクトリでこの許可を使います。PR が追加した project 設定だけでは許可されません。
+
+```yaml
+workflow_system_commands:
+  custom_scripts: true
+```
+
+```yaml
+name: approval-command
+steps:
+  - name: check
+    kind: system
+    system_inputs:
+      - type: command
+        as: approval
+        command: node scripts/check-approval.mjs
+        timeout_ms: 1000
+        output: json
+    wait:
+      until: when(context.check.approval.json.ready == true)
+      interval_ms: 1000
+      max_retries: 30
+      on_timeout: ABORT
+    rules:
+      - condition: when(context.approval.json.status == "approved")
+        next: consume
+      - condition: when(true)
+        next: ABORT
+  - name: consume
+    instruction: "承認結果: {context:check.approval.json.status}"
+    rules:
+      - condition: when(true)
+        next: COMPLETE
+```
+
+`timeout_ms` は必須で、1～2147483647 の整数です。既定値や無期限指定はありません。`output: json` は省略できます。`cwd` は指定できず、タスクの実行ディレクトリ（worktree ならクローン）で起動します。pipeline と対話モードで同じ動作をします。command は effects には指定できません。
+
+結果には `exit_code`（終了コードを取得できない場合は `null`）、`timed_out`、`stdout`、`stderr` が入ります。`json` は `output: json` を指定し、タイムアウトせず終了コード 0 で JSON を解析できた場合だけ入ります。非ゼロ終了とタイムアウトは rules へ渡す結果です。stdout と stderr の合計が 65536 バイトを超えた場合、起動できない場合、成功時の JSON が不正な場合はステップが失敗し、effects と rules は実行されません。
+
+現在の command binding は条件評価時に `context.approval...` とも書けます。既存のステップ名付き scope が同名ならそちらを優先します。保存する値と後続 instruction の参照は `context.check.approval...` の形式です。
+
+TAKT は command のテンプレート展開や引数の追加をしません。直前の応答本文は `TAKT_PREVIOUS_RESPONSE_FILE`、同じ応答に構造化出力があれば `TAKT_PREVIOUS_STRUCTURED_OUTPUT_FILE` で非公開ファイルのパスを渡します。本文がなければ空ファイルを渡し、構造化出力がなければその環境変数は設定しません。スクリプト側でファイルを読み、値を検証してください。ファイルは run の context 配下に保存し、run の成果物として保持します。環境変数はコマンドゲートと同じ基本許可リストと、この2つのファイルパスに限定します。
+
+無通信タイムアウトは適用しません。POSIX では実行期限または中断時にプロセスグループへ SIGTERM を送り、終了しなければ100ms後に SIGKILL を送ります。Windows では `taskkill /T /F` でプロセスツリーを強制終了し、taskkill の完了を待ちます。`wait` は確認ごとにコマンドを実行し直し、各実行に `timeout_ms` を適用します。各確認は同じ直前応答を参照し、次の system step は直前の system 応答を参照します。前回の JSON は引き継ぎません。`wait.max_retries`、`on_timeout`、ステップの計数、`loop_monitors`、元の agent に戻った際のセッション継続は既存の規則に従います。
 
 `effects` はエンジン側のアクションを実行します: `commit_and_push`、`caccia`、`enqueue_task`、`comment_pr`、`sync_with_root`、`resolve_conflicts_with_ai`、`merge_pr`、`close_pr`。各 effect type は 1 step につき最大 1 回しか書けず、結果は `when(effect.<step>.<type>.<field>)` でルーティングします。
 
@@ -847,6 +899,8 @@ output_contracts:
       format: decisions
 ```
 
+Phase 2 では、provider の既存の読み取り専用の設定を使い、レポートの根拠に必要な箇所だけを読みます。今回の Phase 1 実行記録はマスク済み JSONL として保存され、パスとバイト数が渡されます。長い文字列は複数行に分かれているため、検索して周辺だけを参照できます。Phase 2 ではファイルの変更、テスト・ビルドの実行、新しい調査や指摘・判定・計画の追加をせず、Phase 1 の確認実績と Phase 2 で読んだ内容を区別します。最終回答は TAKT がレポートファイルに保存します。Phase 3 ではツールを使いません。
+
 各レポートエントリには `name` と `format` が必須です。任意フィールドが2つあります。
 
 - `use_judge`（デフォルト `true`）— そのレポートを Phase 3 のステータス判定に入力するかどうか。書き出すだけで判定の根拠にしないレポートには `use_judge: false` を指定します。rules の判定が必要な step では少なくとも 1 件の `use_judge` レポートを残す必要があります。
@@ -866,7 +920,27 @@ agent step、`workflow_call`、parallel の親・子 step は同じ workflow 内
     結果: {report:fix-report.md}
 ```
 
-`reports: all` は指定した step の完了済み実行から全レポートを選びます。選択された並列レビュアーや入れ子の呼び出しで作成された報告も対象です。ファイル名を列挙した場合は一致する公開レポートだけを選び、欠落や重複があれば失敗します。`{report:filename}` は選択した本文をその位置に展開します。入力側や祖先に同名のレポートがあっても宣言した生成元の本文を使います。`reports: all` が同名の報告を複数選ぶ場合、その名前の `{report:filename}` は曖昧として失敗します。構文で参照しなかった選択済みの報告は agent の Phase 1 指示の末尾へ追加し、同名の報告にはそれぞれの論理的な生成元を示します。`workflow_call` は入れ子の呼び出し先まで同じ入力を渡します。parallel の親にある宣言は子にも適用されますが、子自身の宣言があればそちらを使います。報告がない場合や呼び出しが未完了の場合、近隣のディレクトリから探さずに失敗します。実行前の経路から入力側へ進む場合に限り `optional_if_unrun: true` を指定してください。入力元の実行前も出力契約にある報告名は予約され、同名の無関係なローカル・祖先の報告にはフォールバックしません。入力元が開始した後は報告が必須です。
+`reports: all` は指定した step の完了済み実行から全レポートを選びます。選択された並列レビュアーや入れ子の呼び出しで作成された報告も対象です。ファイル名を列挙した場合は一致する公開レポートだけを選び、欠落や重複があれば失敗します。`{report:filename}` は選択した本文をその位置に展開します。入力側や祖先に同名のレポートがあっても宣言した生成元の本文を使います。`reports: all` が同名の報告を複数選ぶ場合、その名前の `{report:filename}` は曖昧として失敗します。構文で参照しなかった選択済みの報告は agent の Phase 1 指示の末尾へ追加します。選択名は宣言した生成元をまたいで一意でなければなりません。`reports: all` と任意の未実行生成元も含め、placeholder がなくても doctor とランタイムは曖昧な宣言を拒否します。`workflow_call` は入れ子の呼び出し先まで同じ入力を渡します。parallel の親にある宣言は子にも適用されますが、子自身の宣言があればそちらを使います。報告がない場合や呼び出しが未完了の場合、近隣のディレクトリから探さずに失敗します。実行前の経路から入力側へ進む場合に限り `optional_if_unrun: true` を指定してください。入力元の実行前も出力契約にある報告名は予約され、同名の無関係なローカル・祖先の報告にはフォールバックしません。入力元が開始した後は報告が必須です。
+
+複数の生成元は空でない配列で宣言できます。既存の単一オブジェクト形も使用できます。`optional_if_unrun` と `history` は要素ごとに適用します。
+
+```yaml
+input_reports:
+  - from_step: remediation
+    reports: [fix-plan.md, fix-report.md]
+    history: {previous: 2}
+  - from_step: adjudicate
+    reports: [review-resolution.md]
+    optional_if_unrun: true
+```
+
+`{report:filename}` は現在版を UTF-16 のコード単位で8,000文字まで展開します。超過時は先頭に加え、省略表示と展開した版を固定した正確なパスを渡します。続きはそのパスから読んでください。自動追加する現在版にも同じコード定数を適用し、YAML では設定できません。
+
+`history: {previous: N}` は同じ生成元・実行系列の現在版を除く完了済み過去実行を最大 N 回選びます。N は非負の安全な整数で、0なら過去実行を選びません。`{report_history:filename}` は本文を含まない一覧を古い順に展開します。各行は実行識別、順序、完了状態、生成元、固定版パスを示します。同じ実行の計画と報告は共通の実行識別を持ちます。選択した全行を渡し、別の件数上限は設けません。履歴不足・未完了・報告欠落を明示し、別の実行や古い版で穴埋めしません。並列・入れ子・再開でも実行識別と版を保持します。実行記録のない旧 run の履歴は取得不能とし、日時から推定しません。参照されなかった宣言済み履歴も自動追加します。
+
+履歴を指定した入力には現在版の実行記録も付けます。開始・完了順序は同じ実行系列で共有する番号です。呼び出し単位の実行識別に加え、個々の報告を作った生成元の開始・完了順序を示すため、修正完了後に検証が始まったかを比較できます。取得できない順序は取得不能と表示します。
+
+`loop_monitors[].judge.input_reports` は同じ形と履歴指定を受け付けます。各 `from_step` は監視対象の `cycle` 内に限定し、範囲外なら doctor とランタイムが拒否します。宣言がある judge には `Report Directory`、現在版本文、履歴を同じ展開規則で渡します。宣言がない judge の入力は維持します。
 
 ## Step レベルのプロバイダープロモーション
 
@@ -900,7 +974,7 @@ promotion は並列サブ step ではサポートされません。
 | `policy` | - | policy キーまたはキー配列（section map、または bare 名で project → user → builtin の順に解決） |
 | `knowledge` | - | knowledge キーまたはキー配列（section map、または bare 名で project → user → builtin の順に解決） |
 | `instruction` | - | instruction キー・インライン文字列、またはそれらを並べた空でない配列。facet 参照は section map、または bare 名で project → user → builtin の順に解決 |
-| `edit` | - | step がプロジェクトファイルを編集できるか (`true` / `false`) |
+| `edit` | - | step がプロジェクトファイルを編集できるか (`true` / `false`)。TAKT が Codex の権限を管理する場合、明示した `false` は Phase 1 の書き込みを禁止し、通信可否は `network_access` で別に制御する |
 | `companion` | - | 解決済み runtime profile を使う Companion reviewer を通常 agent step または Team Leader step で実行（[Companion レビュアー](#companion-レビュアー)参照） |
 | `completion_retry` | - | 必須の `retry_instruction` facet と任意の再試行上限を持つ object でレビュー網羅性確認を有効化 |
 | `pass_previous_response` | `true` | 前の step の出力を `{previous_response}` に渡す |
@@ -920,6 +994,10 @@ workflow YAML では provider と model を指定できません。runtime profi
 実効ツール一覧は設定値より狭くなる場合があります。`edit: false` の場合、または step に `output_contracts` があり `edit: true` ではない場合、TAKT は provider 呼び出し前に `provider_options.*.allowed_tools` からコマンド・編集系 tool を除去します。Claude 系 provider ではカンマ区切り entry を atomic な tool spec に正規化し、`Bash(...)` は `(` より前の canonical tool 名で判定してから、`Bash`、`Edit`、`Write`、`Apply_Patch`、`Patch` を除去します。OpenCode では `bash`、`edit`、`write` など lowercase の tool を除去します。同じ read-only フィルタは`part_edit: false` または継承された `edit: false` などにより part の実効 edit 設定が false の場合の `team_leader.part_allowed_tools` にも適用されます。
 
 Pi provider は generic な `Read`、`Glob`、`Grep`、`Edit`、`Write`、`Bash` 名を Pi SDK tool へ変換します。Pi は TAKT の MCP server と structured output に対応しません。step-level の MCP 設定は drop され、session-level の MCP 設定は対応 provider が必要です。`max_turns` は Pi call で無視します。
+
+TAKT が Codex の権限を管理する場合、明示した `edit: false` は解決済みの permission mode にかかわらず Phase 1 の書き込みを禁止します。`network_access: true` なら通信を許可する読み取り専用の権限プロファイルを渡し、それ以外は `read-only` sandbox を使います。`permission_control: codex` では `edit: false` でも書き込み可否と通信可否を Codex 側の設定に委ねます。team leader の part（`part_edit` または `edit` の継承）、parallel の各 sub-step、`workflow_call` の子 workflow の各 step にも、それぞれの実効 `edit` 設定が適用されます。Phase 2 と `strict-readonly` で動く TAKT の内部呼び出し（隔離された構造化呼び出しなど）は権限の委譲時も常に `read-only` sandbox を使い、通信を禁止します。共通の権限解決とほかの provider の動作は変わりません。詳細は [Codex の permission control](./configuration.ja.md#codex-の-permission-control-permission_control) を参照してください。
+
+TAKT が権限を管理する Codex 呼び出しは、書き込み可能な step と新規・再開セッションにも `--ignore-rules` を渡します。利用者・プロジェクトの execpolicy `.rules` によるサンドボックスの制限回避を防ぐためです。権限を Codex に委譲した呼び出しはルールを維持しますが、Phase 2 と `strict-readonly` で動く TAKT の内部呼び出し（隔離された構造化呼び出しなど）は常にルールを無効にして書き込みと通信を禁止します。Phase 2 とこれらの内部呼び出しで選択した `config_profile` は `--ignore-rules` と併せて適用されます。
 
 ## Workflow レベルの設定
 
@@ -1161,7 +1239,7 @@ Companion 定義は `.takt/companions/`、`~/.takt/companions/`、`builtins/{lan
 ## ベストプラクティス
 
 1. **イテレーション数を妥当に保つ** — 開発系 workflow では 10〜30 程度が一般的
-2. **レビュー step では `edit: false`** — レビュアーがコードを変更しないようにする
+2. **レビュー step では `edit: false`** — レビュアーがコードを変更しないようにする。Codex への権限委譲時は Codex 側でも書き込みを禁止する
 3. **わかりやすい step 名を使う** — ログが読みやすくなる
 4. **workflow は段階的にテストする** — 単純な構成から始めて複雑化する
 5. **`takt eject <workflow>` でカスタマイズする** — ビルトイン workflow をコピーして編集する
@@ -1197,13 +1275,32 @@ PR 状態の取得は1回あたり15秒で期限切れになります。`wait` �
 
 fork の脅威検査は merge コマンドが本体 workflow の前に実行します。番号指定と自動起動でも検査し、同一リポジトリの PR では省略します。機械的検出、AI の疑わしい判定、差分上限超過や未判定は理由を PR にコメントして本体を開始しません。Git の取得・push と provider のツールは通常の設定を使用します。
 
-`merge-review` は `review` と Caccia 効果を実行し、CI の結果と評価を PR にコメントします。`merge-review-fix` は同期と競合解決の後に `review-fix` を実行し、修正の push、Caccia 効果、CI とレビュー状態の確認、マージへ進みます。レビューが失敗した場合は理由をコメントして停止します。CI失敗では後述の回復処理へ進みます。
+`merge-review` は `review` と Caccia 効果を実行し、CI の結果と評価を PR にコメントします。`merge-review-fix` は同期し、AIで競合を解消した場合は初回・再同期とも `review-fix` を実行します。競合のない同期ではフルレビューを呼ばず、共通の push、Caccia 効果、CI とレビュー状態の確認、マージへ進みます。レビューが失敗した場合は理由をコメントして停止します。CI失敗では後述の回復処理へ進みます。
 
-`takt merge` の既定である `merge-review-fix-simple` は、PR と土台ブランチを同期し、必要なら競合を解消してから `review-fix-simple` を実行します。情報収集後は1体の読み取り専用レビュアーが変更に応じたファセットで確認します。指摘は別ステップで裁定し、修正計画・修正・完了検証を経て再レビューします。要件の最終確認が完了したら修正を push し、Caccia 効果が返す head の CI と GitHub のレビュー・マージ可能状態を確認してマージします。子 workflow の失敗ではマージせず、結果を PR にコメントします。CI失敗では後述の回復処理へ進みます。並列の専門レビューを使う場合は `merge-review-fix` を選べます。
+`takt merge` の既定である `merge-review-fix-simple` は、PR と土台ブランチを同期します。競合のない同期ではフルレビューを呼ばずpushへ進み、AIで競合を解消した場合は初回・再同期とも `review-fix-simple` を実行します。情報収集後は1体の読み取り専用レビュアーが変更に応じたファセットで確認します。指摘は別ステップで裁定し、修正計画・修正・完了検証を経て再レビューします。レビュー経路では要件の最終確認まで行い、その後は共通経路で変更を push し、Caccia 効果が返す head の CI と GitHub のレビュー・マージ可能状態を確認してマージします。子 workflow の失敗ではマージせず、結果を PR にコメントします。CI失敗では後述の回復処理へ進みます。並列の専門レビューを使う場合は `merge-review-fix` を選べます。
+
+### CI成功済みPRのレビュー
+
+`merge-review-ci` は明示指定時だけ動くworkflowです。先頭のsystem stepで既存 `pr_status` を読み、`ci.finished` と `ci.passed` が両方真の場合だけ `workflow_call` で既存 `merge-review` を呼びます。成功の定義は既存処理と同じで、`SUCCESS`・`NEUTRAL`・`SKIPPED` を含みます。未完了・失敗・チェック未作成なら、レビュー・Caccia・評価コメントを実行せず `COMPLETE` になります。事前判定では待機・再試行せず、新しい設定項目やCLIオプションも追加しません。
+
+```bash
+takt merge 123 --workflow merge-review-ci
+takt merge --workflow merge-review-ci
+takt merge --workflow merge-review-ci --include-forks
+```
+
+コード変更・commit・push・マージを行わずレビューとコメントだけを実行するには、既存の `.takt/config.yaml` に次を設定します。
+
+```yaml
+caccia:
+  enabled: false
+```
+
+事前判定の後は、既存 `merge-review` がレビュー・Caccia・その後のCI確認・評価と `TAKT evaluation: approved={true|false}. {reason}` 形式のコメントを担当し、子の `COMPLETE` または `ABORT` をそのまま返します。workflow開始前のfork選択と脅威検査は変わりません。バッチでは包含指定がないforkを除外し、番号指定では選定条件を省略しても脅威検査を実行します。拒否時の既存停止コメントも維持します。`merge-review`・`merge-review-fix`・`merge-review-fix-simple` の直接実行時の動作と既定値は保持します。
 
 ### CI回復の入力と効果
 
-`merge-review-fix` と `merge-review-fix-simple` はCI待ち後に `CONFLICTING` を検出すると、ベースブランチを取り込み直して必要な競合解消を行います。初回のレビューは繰り返さず、push → Caccia → 新しいHEADのCI待ち → マージ判定へ進みます。`BEHIND` だけなら取り込み直さず、レビューなどの既存条件を確認してマージを試みます。取り込み直しは `max(2, 実行時並列数 - 1)` 回までです。並列数2・3では2回、4では3回となり、初回の同期は数えません。CLIの `--concurrency` を含む実行時並列数をタスクへ保存し、Requeue・Retryでも使います。上限に達しても競合が続く場合は理由をPRへコメントしてCOMPLETEで終了し、マージしません。CI修正・再実行の使用済み回数は取り込み直し後も保持します。
+`merge-review-fix` と `merge-review-fix-simple` はCI待ち後に `CONFLICTING` を検出すると、ベースブランチを取り込み直して必要な競合解消を行います。初回・再同期とも、競合のない同期ではフルレビューを呼ばず、push → Caccia → 新しいHEADのCI待ち → マージ判定へ進みます。AIで競合を解消した場合は、毎回レビュー・修正を経てからpushします。`BEHIND` だけなら取り込み直さず、レビューなどの既存条件を確認してマージを試みます。取り込み直しは `max(2, 実行時並列数 - 1)` 回までです。並列数2・3では2回、4では3回となり、初回の同期は数えません。CLIの `--concurrency` を含む実行時並列数をタスクへ保存し、Requeue・Retryでも使います。上限に達しても競合が続く場合は理由をPRへコメントしてABORTで終了し、マージしません。CI修正・再実行の使用済み回数は取り込み直し後も保持します。
 
 再実行直前に現在のPR HEADを取得し、証拠のHEADと異なる場合は再実行を拒否します。受付後にHEADが変わった場合も待機を抜け、元HEADの失敗チェックとログを保持して不一致理由をコメントしてからABORTします。`pr_status`のsystem inputは`rerunHeadChanged`と`rerunHeadChangeReason`を常に返します。通常のpollingでは`false`と空文字列になります。run・repository・attemptの検証は引き続き適用されます。
 
@@ -1238,6 +1335,6 @@ GitHub での実行前には PR head と開始時のクローン HEAD を照合�
 
 GitLab でも MR の詳細と CI 状態を取得し、`github_unavailable` の `skipped` 後に返された head の CI を待ちます。マージ方式の指定と head 一致制約は未対応なので、これらを渡す `merge_pr` は失敗します。
 
-マージ用ビルトインは Caccia を明示的に実行します。`merge-review` は `review → caccia → wait_ci → 評価コメント`、`merge-review-fix` と `merge-review-fix-simple` は `review/fix → commit_and_push → caccia → wait_ci → merge_pr` の順です。`success` と `skipped` は返された head の CI 待ちへ進みます。`limit` は未解決件数をコメントして COMPLETE で終了し、マージしません。効果の失敗は `error` をコメントして ABORT で終了します。push、タスク後処理、Pipeline からの暗黙の Caccia は廃止しました。`merge.auto_start: true` では PR 公開後にマージ用 workflow が起動し、その明示効果が Caccia を実行します。
+マージ用ビルトインは Caccia を明示的に実行します。`merge-review` は `review → caccia → wait_ci → 評価コメント`、`merge-review-fix` と `merge-review-fix-simple` は `sync → commit_and_push → caccia → wait_ci → merge_pr` の順です。AIで競合を解消した場合は、初回・再同期とも `commit_and_push` の前にレビュー・修正を行います。`success` と `skipped` は返された head の CI 待ちへ進みます。`limit` は未解決件数をコメントして ABORT で終了し、マージしません。効果の失敗は `error` をコメントして ABORT で終了します。Git の push 自体は Caccia を起動しません。`caccia.enabled: true` の場合、worktree タスクの `auto_pr` と Pipeline の `--auto-pr` は PR 作成・更新成功後に Caccia を実行します。PR 公開失敗、PR がない場合、goal 管理タスク、GitHub 以外では後処理の Caccia を実行しません。実行した workflow（実際に呼び出された子 workflow を含む）に明示の `caccia` system 効果がある場合も後処理を抑止します。`merge.auto_start: true` では、選択されたマージ用 workflow（呼び出し先を含む）に同じ効果があれば後処理の Caccia を抑止し、マージ用 workflow が実行を担当します。効果がなければ Caccia の完了後にマージ用 workflow を起動します。step 名や指示文の文字列は効果として扱いません。
 
-`merge-review-fix` と `merge-review-fix-simple` はCI失敗が確定するたびに失敗チェック、run・attempt・jobの参照先、ログ本文、PRの累積差分、関連コードを調査します。フレークやmainでも失敗する欠陥はPRの作業ツリーで根本修正し、読み取り専用レビューを経てpush → Caccia → CI待ちへ戻ります。修正は最大2周です。外部要因を証拠で判断した場合だけ、修正回数とは独立してCIを1回再実行します。修正2周後も未使用なら再実行できます。同じHEADの新しいattemptを待ち、すべてのチェックと既存のマージ条件を再確認します。証拠不足、修正2周後も残る欠陥、修正レビューのREJECT、再実行後の失敗では回数・最後の失敗チェックと参照先・調査要点をPRへコメントしてABORTします。調査・修正レポートはrunに残ります。初回成功とCIのtimeoutの扱いは変わらず、`merge-review` はコメント専用のままです。GitHub Actionsのログ取得・再実行の権限不足や未対応Providerは明示します。
+`merge-review-fix` と `merge-review-fix-simple` はCI失敗が確定するたびに失敗チェック、run・attempt・jobの参照先、ログ本文、PRの累積差分、関連コードを調査します。フレークやmainでも失敗する欠陥はPRの作業ツリーで根本修正し、読み取り専用レビューを経てpush → Caccia → CI待ちへ戻ります。修正は最大2周です。外部要因を証拠で判断した場合だけ、修正回数とは独立してCIを1回再実行します。修正2周後も未使用なら再実行できます。同じHEADの新しいattemptを待ち、すべてのチェックと既存のマージ条件を再確認します。証拠不足、修正2周後も残る欠陥、修正レビューのREJECT、再実行後の失敗では回数・最後の失敗チェックと参照先・調査要点をPRへコメントしてABORTします。調査・修正レポートはrunに残ります。CIが初回から成功した場合は回復処理を行わず、CI待機のtimeoutは未解決としてABORTし、`merge-review` はコメント専用のままです。GitHub Actionsのログ取得・再実行の権限不足や未対応Providerは明示します。

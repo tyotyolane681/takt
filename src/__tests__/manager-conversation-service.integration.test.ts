@@ -1,756 +1,506 @@
-import { randomUUID } from 'node:crypto';
-import * as privateFiles from '../shared/utils/private-file.js';
-import * as managerConfig from '../infra/config/managerConfig.js';
-import { createInquiry } from '../infra/goals/inquiry.js';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
-import { beforeEach, afterEach, expect, it, vi } from 'vitest';
+import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { conversationDaemon } from './helpers/conversation-daemon.js';
+import { humanTurnText } from './helpers/daemon-turn.js';
 import { getGlobalConfigDir } from '../infra/config/paths.js';
-import { createConversationService } from '../features/manager/conversationService.js';
-import { ConversationStore } from '../infra/conversations/store.js';
 import { conversationRecord } from './helpers/conversation-fixtures.js';
-import type { ConversationRecord } from '../infra/conversations/schema.js';
-import type { ConversationDelivery, PortOutput, SnapshotRead, SnapshotItem } from '../features/manager/conversationPort.js';
-import type { PreparedConversationRuntime } from '../features/manager/conversationRuntime.js';
-import type { ManagerAssignment } from '../features/manager/startupResolution.js';
-import { goalRecord } from './helpers/goal-fixtures.js';
-import { createManagerTurnExecutor } from '../features/manager/turnExecutor.js';
-import { makeProvider } from './test-helpers.js';
-import type { ProviderAgent } from '../infra/providers/types.js';
 import { conversationId } from '../infra/conversations/identity.js';
+import { deferred, input, accepted } from './helpers/controlledDaemon.js';
+import { createManagerTurnExecutor, type ManagerTurnInput } from '../features/manager/turnExecutor.js';
+import { runFormalSpecVerification } from '../features/interactive/formalSpecVerification.js';
+import type { ProviderAgent } from '../infra/providers/types.js';
+import { makeProvider } from './test-helpers.js';
+import type { PortOutput } from '../features/manager/conversationPort.js';
 import { GoalStore } from '../infra/goals/store.js';
-import { EventEmitter } from 'node:events';
-import { CodexProvider } from '../infra/providers/codex.js';
-import { ClaudeTerminalProvider } from '../infra/providers/claude-terminal.js';
-import type { TaskState } from '../infra/task/types.js';
-import { GoalSchema } from '../infra/goals/schema.js';
+import { goalRecord } from './helpers/goal-fixtures.js';
+import * as conversationPlan from '../features/manager/conversationPlan.js';
+import * as managerMcp from '../features/manager/managerMcp.js';
+import { createConversationRuntime } from '../features/manager/conversationRuntime.js';
+import type { ManagerConversationPlan } from '../features/manager/conversationPlan.js';
+import { EventRecordSchema } from '../infra/daemon/eventRecord.js';
+import { createWorkspace } from '../infra/config/global/workspaceRegistry.js';
+import { DaemonPersistedFiles } from '../infra/daemon/persistedFiles.js';
+import { receiveInboxChange } from '../features/daemon/inbox.js';
+import { DaemonRouting } from '../features/daemon/routing.js';
+import { registerProject } from '../infra/config/global/projectRegistry.js';
+import * as privateFiles from '../infra/daemon/privateFile.js';
+import type { ToolActivityTurnState } from '../shared/tool-activity/types.js';
 
-const doubles = vi.hoisted(() => ({ assignment: vi.fn(), register: vi.fn(), notification: vi.fn(), codexRun: vi.fn(), tmux: vi.fn(), transcript: vi.fn(), pasteInput: vi.fn(), taskItems: vi.fn<() => TaskState[]>() }));
-vi.mock('../features/manager/turnFailureNotification.js', () => ({ notifyManagerTurnFailure: doubles.notification }));
-vi.mock('../infra/managed-providers/loader.js', () => ({ loadManagedSdk: async () => ({
-  directory: process.cwd(), modules: [await import('@openai/codex-sdk')], stale: false,
-}) }));
-vi.mock('@openai/codex-sdk', () => ({ Codex: class {
-  startThread() { return { runStreamed: (input: unknown, options: unknown) => doubles.codexRun(undefined, input, options) }; }
-  resumeThread(id: string) { return { id, runStreamed: (input: unknown, options: unknown) => doubles.codexRun(id, input, options) }; }
-} }));
-// The permission trust query is a separate CLI boundary; keep the real hook lifetime.
-vi.mock('../infra/codex/hook-trust.js', () => ({ resolveCodexHookTrust: async () => ({ key: 'fixture', trustedHash: 'sha256:fixture' }) }));
-vi.mock('node:child_process', async (original) => ({
-  ...await original<typeof import('node:child_process')>(),
-  execFile: (...args: unknown[]) => doubles.tmux(...args),
-  spawn: (command: string, args: string[]) => {
-    if (command !== 'tmux' || args[0] !== 'load-buffer') throw new Error('Unexpected child process');
-    const child = new EventEmitter();
-    return Object.assign(child, { stdin: Object.assign(new EventEmitter(), { end: (text: string) => { doubles.pasteInput(text); queueMicrotask(() => child.emit('close', 0)); } }),
-      stderr: Object.assign(new EventEmitter(), { setEncoding: () => {} }), kill: vi.fn() });
-  },
-}));
-vi.mock('../infra/claude-terminal/transcript-reader.js', () => ({ ProjectClaudeTranscriptReader: class {
-  async readBaseline() { return { byteOffset: 0, lineNumberOffset: 0 }; }
-  async findSession({ sessionId }: { sessionId: string }) { return { sessionId }; }
-  async waitForAssistantResponse(options: unknown) { return doubles.transcript(options); }
-} }));
-vi.mock('../features/manager/assignment.js', async (original) => ({
-  ...await original<typeof import('../features/manager/assignment.js')>(),
-  resolveCurrentManagerAssignment: doubles.assignment, resolveAssignedProjectRoot: async (path: string) => path,
-}));
-vi.mock('../infra/task/repositoryDirectory.js', async (original) => ({
-  ...await original<typeof import('../infra/task/repositoryDirectory.js')>(), resolveGitRepositoryDirectory: async (path: string) => path,
-}));
-vi.mock('../infra/task/runner.js', () => ({ TaskRunner: class { listTaskStateItems = doubles.taskItems; } }));
-vi.mock('../features/manager/conversationPlan.js', () => ({ createManagerConversationPlan: () => ({ ctx: { providerType: 'mock', model: 'model-A' } }) }));
-vi.mock('../infra/goals/service.js', async (original) => ({
-  ...await original<typeof import('../infra/goals/service.js')>(), registerReservedGoal: doubles.register,
+vi.mock('../features/interactive/formalSpecVerification.js', () => ({
+  runFormalSpecVerification: vi.fn(), cleanupFormalSpecVerificationArtifacts: vi.fn(),
 }));
 
-const owner = { pid: 1234, identity: { startTime: 'daemon-B' }, version: 'test', cliPath: '/test/cli.js' };
-const execute = vi.fn<PreparedConversationRuntime['executor']['execute']>();
-const closeRuntime = vi.fn(async () => {});
+vi.mock('../features/manager/assignment.js', async (original) => {
+  const actual = await original<typeof import('../features/manager/assignment.js')>();
+  return { ...actual, resolveCurrentManagerAssignment: async (...[assignment, directory]: Parameters<typeof actual.resolveCurrentManagerAssignment>) =>
+    assignment.kind === 'repository' ? { ...assignment, repositoryDirectories: [assignment.repositoryDirectory] }
+      : actual.resolveCurrentManagerAssignment(assignment, directory) };
+});
+const execute = vi.fn(async (value: ManagerTurnInput) => ({ message: value.prompt, summary: null, sessionId: 'persisted-session', assignment: value.assignment }));
 const resolveRuntime = vi.fn();
-let directory: string;
+let fixture: Awaited<ReturnType<typeof conversationDaemon>>;
 let repository: string;
-let assignment: ManagerAssignment;
-let store: ConversationStore;
-let record: ConversationRecord;
-let service: ReturnType<typeof createConversationService>;
-let outputs: PortOutput[];
-let delivery: ConversationDelivery;
-let lastOperationId: string | undefined;
+let id: string;
+beforeEach(async () => {
+  execute.mockClear();
+  resolveRuntime.mockReset();
+  resolveRuntime.mockResolvedValue({ provider: 'mock', model: null, language: 'en', contextKey: 'test', executor: { execute } });
+  const directory = getGlobalConfigDir(); repository = join(directory, 'repository');
+  await mkdir(join(repository, '.takt'), { recursive: true });
+  await writeFile(join(repository, '.takt', 'config.yaml'), 'provider: mock\nlanguage: en\nmanager:\n  auto_run: false\n');
+  await mkdir(join(directory, 'conversations'), { recursive: true });
+  const record = conversationRecord(repository); id = record.id;
+  await writeFile(join(directory, 'conversations', `${id}.json`), JSON.stringify(record));
+  fixture = await conversationDaemon(directory, { resolve: resolveRuntime, async close() {} });
+});
+afterEach(async () => { await fixture.close(); vi.restoreAllMocks(); });
 
-function open() {
-  return service.open({ conversationId: record.id, assignment: record.assignment,
-    binding: record.bindings[0]!, speaker: record.counterpart }, delivery);
+async function open() {
+  const outputs: PortOutput[] = [];
+  const completed = deferred<Extract<PortOutput, { kind: 'result' }>>();
+  const attachment = await fixture.input.open({ conversationId: id, assignment: { kind: 'repository', repositoryDirectory: repository },
+    speaker: { namespace: 'local', id: 'operator' }, binding: { port: 'tui', key: randomUUID(), counterpart: { namespace: 'local', id: 'operator' } } }, {
+    async deliver(_id, output) { outputs.push(output); if (output.kind === 'result') completed.resolve(output); return { kind: 'delivered' }; },
+  });
+  attachment.read.cancel();
+  return { ...attachment, outputs, completed, submit: (text: string) => fixture.input.submit({ attachmentId: attachment.attachmentId, requestId: randomUUID(), speaker: { namespace: 'local', id: 'operator' }, command: { kind: 'message', text } }) };
 }
-async function state(read: SnapshotRead) {
-  const iterator = read.items[Symbol.asyncIterator]();
-  try {
-    const item = (await iterator.next()).value;
-    if (item?.kind !== 'state') throw new Error('State must be first');
-    return item.state;
-  } finally { await iterator.return?.(); }
-}
-async function submit(attachmentId: string, command: Parameters<typeof service.submit>[0]['command']) {
-  const result = await service.submit({ attachmentId, requestId: 'request', speaker: record.counterpart, command });
-  if (result.kind === 'accepted') lastOperationId = result.operationId;
-  return result;
-}
-async function finished() {
-  await vi.waitFor(() => expect(service.activeOperationCount).toBe(0));
-  if (service.attachmentCount > 0 && lastOperationId !== undefined) {
-    await vi.waitFor(() => expect(outputs.some((output) => output.kind === 'result' && output.operationId === lastOperationId)).toBe(true));
+
+it('persists the session and applies the human response to the current proposal', async () => {
+  const port = await open();
+  expect(await port.submit('continue the existing goal')).toMatchObject({ kind: 'accepted', acceptedSequence: 1 });
+  expect((await port.completed.promise).result).toMatchObject({ kind: 'reply' });
+  await fixture.dispatcher.drain();
+  expect((await fixture.store.read(id))!.state).toMatchObject({ revision: 5, pending: null, session: { sessionId: 'persisted-session' } });
+  expect(execute.mock.calls[0]![0].sessionId).toBe('provider-session');
+  expect((await fixture.store.read(id))!.state.session.contextKey).toBe('test');
+});
+
+it.each(['start', 'result', 'delivery'] as const)('preserves the acquired change without repeating the provider after a history %s failure', async (failure) => {
+  const call = vi.fn<ProviderAgent['call']>(async (_prompt, options) => {
+    options.onStream!({ type: 'tool_use', data: { id: 'tool', tool: 'Read', input: { file_path: 'a.ts' } } });
+    options.onStream!({ type: 'tool_result', data: { id: 'tool', content: 'ready', isError: false } });
+    return { persona: 'manager', status: 'done', content: '', timestamp: new Date(), sessionId: 'acquired-session',
+      structuredOutput: { message: 'done', summary: null } };
+  });
+  const executor = createManagerTurnExecutor(repository, { ctx: { providerType: 'mock', lang: 'en', model: undefined,
+    provider: makeProvider({ setup: () => ({ call }) }) }, strategy: { systemPrompt: 'manager' } });
+  resolveRuntime.mockResolvedValue({ provider: 'mock', model: null, language: 'en', contextKey: 'test', executor });
+  const write = privateFiles.writePrivateFile; let failed = false;
+  vi.spyOn(privateFiles, 'writePrivateFile').mockImplementation(async (path, content, signal) => {
+    if (failure !== 'delivery' && path.endsWith(`/conversations/${id}.json`) && !failed) {
+      const value = JSON.parse(typeof content === 'string' ? content : Buffer.from(content).toString('utf8')) as { daemonState?: { toolHistory?: ToolActivityTurnState } };
+      const history = value.daemonState?.toolHistory;
+      if (history !== undefined && !history.finished
+        && history.history.entries.some((entry) => failure === 'start' ? entry.status === 'running' : entry.status === 'success')) {
+        failed = true; throw new Error('Injected publication failure');
+      }
+    }
+    await write(path, content, signal);
+  });
+  const completed = deferred<Extract<PortOutput, { kind: 'result' }>>();
+  const attachment = await fixture.input.open({ conversationId: id, assignment: { kind: 'repository', repositoryDirectory: repository },
+    speaker: { namespace: 'local', id: 'operator' }, binding: { port: 'tui', key: randomUUID(), counterpart: { namespace: 'local', id: 'operator' } } }, {
+    async deliver(_id, output) {
+      if (failure === 'delivery' && output.kind === 'tool_history' && !failed) { failed = true; throw new Error('Injected delivery failure'); }
+      if (output.kind === 'result') completed.resolve(output);
+      return { kind: 'delivered' };
+    },
+  });
+  attachment.read.cancel();
+  const admission = await fixture.input.submit({ attachmentId: attachment.attachmentId, requestId: randomUUID(),
+    speaker: { namespace: 'local', id: 'operator' }, command: { kind: 'message', text: 'Read once' } });
+  expect(admission).toMatchObject({ kind: 'accepted' });
+  const result = await completed.promise;
+  await expect(fixture.settled()).rejects.toThrow();
+  expect(failed).toBe(true);
+  expect(result.result).toMatchObject(failure === 'delivery' ? { kind: 'reply', message: 'done' } : { kind: 'error', code: 'failed' });
+  expect((await fixture.store.read(id))!.state.session.sessionId).toBe('acquired-session');
+  const records = await fixture.events.restore();
+  const pending = []; for await (const event of records.pending) pending.push(event);
+  expect(pending).toHaveLength(0);
+  expect(fixture.dispatcher.activeTurnCount).toBe(0);
+  expect(call).toHaveBeenCalledOnce();
+  if (failure === 'delivery') {
+    const snapshot = await fixture.conversations.snapshot(id);
+    const items = []; for await (const item of snapshot.items) items.push(item);
+    snapshot.complete();
+    expect(items.find((item) => item.kind === 'tool_history')).toMatchObject({ history: { finished: true,
+      history: { entries: [{ status: 'success', result: 'ready' }] } } });
   }
-}
-function saveGoal(id: string) {
-  const goal = { ...goalRecord(), ...record.pending!.summary, id };
-  const path = join(repository, '.takt', 'goals', id);
-  mkdirSync(path, { recursive: true });
-  writeFileSync(join(path, 'goal.json'), JSON.stringify(goal));
-  return goal;
-}
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  doubles.notification.mockReset().mockResolvedValue(undefined);
-  doubles.taskItems.mockReset().mockReturnValue([]);
-  directory = getGlobalConfigDir();
-  repository = join(directory, 'repository');
-  mkdirSync(repository, { recursive: true });
-  record = { ...conversationRecord(repository), model: 'model-A' };
-  assignment = { kind: 'repository', repositoryDirectory: repository, repositoryDirectories: [repository] };
-  doubles.assignment.mockReset().mockResolvedValue(assignment);
-  store = new ConversationStore(directory);
-  store.write(record);
-  execute.mockReset().mockResolvedValue({ message: 'manager reply', summary: null, sessionId: 'next-session', assignment: record.assignment });
-  doubles.register.mockReset().mockImplementation(async ({ id }: { id: string }) => saveGoal(id));
-  resolveRuntime.mockReset().mockResolvedValue({ provider: 'mock', model: 'model-A', language: 'en', contextKey: 'context-A', executor: { execute } });
-  const runtime = { resolve: resolveRuntime, close: closeRuntime };
-  service = createConversationService({ configDirectory: directory, owner, runtime, onDomainChange: vi.fn() });
-  outputs = [];
-  lastOperationId = undefined;
-  delivery = { deliver: async (_id, output) => { outputs.push(output); return { kind: 'delivered' }; } };
 });
-afterEach(async () => { vi.restoreAllMocks(); await service.close(); });
 
-it('reopens the same conversation with two independent attachments and no provider call', async () => {
+it.each([1, 2])('replaces persisted history after the daemon restarts its generation counter following %s completed turns', async (previousTurns) => {
+  let invocation = 0;
+  const call = vi.fn<ProviderAgent['call']>(async (_prompt, options) => {
+    const index = ++invocation;
+    options.onStream!({ type: 'tool_use', data: { id: 'reused-tool', tool: 'Read', input: { file_path: `turn-${index}.ts` } } });
+    options.onStream!({ type: 'tool_result', data: { id: 'reused-tool', content: `result-${index}`, isError: false } });
+    return { persona: 'manager', status: 'done', content: '', timestamp: new Date(), sessionId: 'restored-session',
+      structuredOutput: { message: 'done', summary: null } };
+  });
+  const executor = createManagerTurnExecutor(repository, { ctx: { providerType: 'mock', lang: 'en', model: undefined,
+    provider: makeProvider({ setup: () => ({ call }) }) }, strategy: { systemPrompt: 'manager' } });
+  resolveRuntime.mockResolvedValue({ provider: 'mock', model: null, language: 'en', contextKey: 'test', executor });
   const first = await open();
-  const second = await open();
-  expect(first.attachmentId).not.toBe(second.attachmentId);
-  expect(await state(first.read)).toMatchObject({ conversationId: record.id, revision: 4, pending: record.pending });
-  expect(await state(second.read)).toMatchObject({ conversationId: record.id, revision: 4, pending: record.pending });
-  expect(service.attachmentCount).toBe(2);
-  service.detach(first.attachmentId);
-  expect(service.attachmentCount).toBe(1);
-  const reopened = await open();
-  expect(await state(reopened.read)).toMatchObject({ conversationId: record.id, pending: record.pending });
-  expect(execute).not.toHaveBeenCalled();
+  for (let index = 0; index < previousTurns; index++) {
+    await first.submit(`Previous turn ${index}`); await fixture.settled();
+  }
+  const previous = (await fixture.store.readToolHistory(id))!;
+  expect(previous.history.entries).toMatchObject([{ result: `result-${previousTurns}`, status: 'success' }]);
+  await fixture.close();
+  fixture = await conversationDaemon(getGlobalConfigDir(), { resolve: resolveRuntime, async close() {} });
+  const second = await open(); await second.submit('New turn after restart'); await fixture.settled();
+  const current = (await fixture.store.readToolHistory(id))!;
+  expect(current.operationId).not.toBe(previous.operationId);
+  expect(previous.generation).toBe(previousTurns);
+  expect(current.generation).toBe(1);
+  expect(current).toMatchObject({ finished: true, history: { entries: [{ toolId: 'reused-tool', result: `result-${previousTurns + 1}`, status: 'success' }] } });
+  expect(current.history.entries).toHaveLength(1);
+  const snapshot = await fixture.conversations.snapshot(id);
+  const items = [];
+  for await (const item of snapshot.items) items.push(item);
+  snapshot.complete();
+  expect(items.find((item) => item.kind === 'tool_history')).toEqual({ kind: 'tool_history', history: current });
+  expect((await fixture.store.read(id))!.state.session.sessionId).toBe('restored-session');
+  expect(call).toHaveBeenCalledTimes(previousTurns + 1);
 });
 
-it('captures a complete snapshot state before later conversation updates', async () => {
-  const opened = await open();
-  const oldRead = await service.snapshot(opened.attachmentId);
-  await submit(opened.attachmentId, { kind: 'message', text: 'new request' });
-  await finished();
-  expect(await state(oldRead)).toMatchObject({ revision: 4, pending: record.pending, running: null });
-  expect(await state(await service.snapshot(opened.attachmentId))).toMatchObject({ revision: 5, pending: null, running: null });
-});
-
-it.each([false, true])('retains permission denials only for the next human turn, including provider failure=%s, without persisting them', async (failed) => {
-  const opened = await open();
-  execute.mockImplementationOnce(async (input) => {
-    input.onDenial?.('The destination needs human confirmation');
-    if (failed) throw new Error('Provider failed after permission denial');
-    return { message: 'Waiting', summary: null, sessionId: 'human-session', assignment: record.assignment };
-  });
-  await submit(opened.attachmentId, { kind: 'message', text: 'First human request' }); await finished();
-  await submit(opened.attachmentId, { kind: 'message', text: 'Review the refusal' }); await finished();
-  expect(execute.mock.calls[1]![0].prompt).toContain('The destination needs human confirmation');
-  expect(execute.mock.calls[1]![0].instruction).toBe('Review the refusal');
-  await submit(opened.attachmentId, { kind: 'message', text: 'Continue independently' }); await finished();
-  expect(execute.mock.calls[2]![0].prompt).not.toContain('The destination needs human confirmation');
-  expect(readFileSync(join(directory, 'conversations', `${record.id}.json`), 'utf8')).not.toContain('The destination needs human confirmation');
-});
-
-it('publishes the configured conversation failure notice from the daemon and still terminates the failed operation', async () => {
-  const failure = new Error('Provider refused this operation');
-  execute.mockRejectedValueOnce(failure);
-  doubles.notification.mockResolvedValueOnce('Blocked conversation notice');
-  const opened = await open();
-  await submit(opened.attachmentId, { kind: 'message', text: 'Please continue' }); await finished();
-  expect(doubles.notification).toHaveBeenCalledExactlyOnceWith(repository, undefined, failure);
-  expect(outputs).toContainEqual({ kind: 'notice', id: expect.any(String), message: 'Blocked conversation notice' });
-  expect(store.read(record.id, record.assignment)?.running).toBeNull();
-});
-
-it('includes saved run results in the fresh human business context and bounds large goal memory', async () => {
-  record.sessionId = null; store.write(record);
-  const workLog = Array.from({ length: 100 }, (_, recordIndex) => ({
-    id: '650e8400-e29b-41d4-a716-' + String(recordIndex).padStart(12, '0'),
-    recordedAt: '2026-10-14T00:00:00Z', summary: 'task-X result ' + recordIndex + '詳細'.repeat(20000),
+it.each([false, true])('compares the saved system prompt fingerprint on the first turn after restart (changed: %s)', async (changed) => {
+  const directory = getGlobalConfigDir();
+  const call = vi.fn<ProviderAgent['call']>().mockImplementation(async () => ({
+    persona: 'manager', status: 'done', content: '', timestamp: new Date(),
+    structuredOutput: { message: 'done', summary: null }, sessionId: `session-${call.mock.calls.length}`,
   }));
-  const goals = Array.from({ length: 100 }, (_, index) => ({ ...goalRecord(),
-    id: '550e8400-e29b-41d4-a716-' + String(index).padStart(12, '0'), objective: '目的'.repeat(30000),
-    workLog,
-  }));
-  vi.spyOn(GoalStore.prototype, 'iterate').mockImplementation(async function* () { yield* goals; });
-  const opened = await open();
-  await submit(opened.attachmentId, { kind: 'message', text: 'Review current work' }); await finished();
-  const context = JSON.parse(execute.mock.calls[0]![0].recovery!.context);
-  expect(Buffer.byteLength(JSON.stringify(context.goals))).toBeLessThanOrEqual(64 * 1024);
-  expect(context.goals.repositories[0]).toMatchObject({ repositoryDirectory: repository, goalCount: 100 });
-  expect(context.goals.repositories[0].goals.length).toBeGreaterThan(0);
-  expect(context.goals.repositories[0].goals.length).toBeLessThan(100);
-  expect(context.goals.repositories[0].goals[0]).toMatchObject({ workLogCount: 100,
-    references: { goal: join(repository, '.takt', 'goals', goals[0]!.id, 'goal.json') } });
-  expect(context.goals.repositories[0].goals[0].workLog).toHaveLength(3);
-  expect(execute.mock.calls[0]![0].recovery!.context).toContain('task-X result');
-  expect(execute.mock.calls[0]![0].recovery!.context).not.toContain(goals[0]!.objective);
-});
-
-it('preserves an unreadable goal-memory diagnostic instead of inventing an empty successful read', async () => {
-  vi.spyOn(GoalStore.prototype, 'iterate').mockImplementation(async function* () { throw new Error('Goal directory cannot be listed'); });
-  const opened = await open();
-  await submit(opened.attachmentId, { kind: 'message', text: 'Review current work' }); await finished();
-  expect(execute.mock.calls[0]![0].recovery!.context).toContain('Goal directory cannot be listed');
-  expect(execute.mock.calls[0]![0].recovery!.context).toContain('diagnostics');
-  expect(outputs.at(-1)).toMatchObject({ kind: 'result', result: { kind: 'reply' } });
-});
-
-it('saves metadata and an unapproved summary without utterances, replies or a reserved goal ID', async () => {
-  execute.mockResolvedValueOnce({ message: '返事の本文シマウマ', summary: { ...record.pending!.summary, repositoryDirectory: repository },
-    sessionId: 'new-session', assignment: record.assignment });
-  const opened = await open();
-  expect((await submit(opened.attachmentId, { kind: 'message', text: 'あいことばキリン' })).kind).toBe('accepted');
-  await finished();
-  const saved = store.read(record.id, record.assignment)!;
-  expect(saved).toMatchObject({ id: record.id, assignment: record.assignment, counterpart: record.counterpart,
-    lastSpeaker: record.counterpart, bindings: record.bindings, provider: 'mock', model: 'model-A', sessionId: 'new-session',
-    revision: 5, pending: { revision: 5, summary: record.pending!.summary }, approval: null, running: null });
-  const persisted: unknown = JSON.parse(readFileSync(join(directory, 'conversations', `${record.id}.json`), 'utf8'));
-  expect(Object.keys(persisted as object).sort()).toEqual(Object.keys(record).sort());
-  for (const secret of ['あいことばキリン', '返事の本文シマウマ']) expect(JSON.stringify(persisted)).not.toContain(secret);
-  expect(doubles.register).not.toHaveBeenCalled();
-});
-
-it('rejects an old revision after a newer message without goal registration', async () => {
-  const opened = await open();
-  await submit(opened.attachmentId, { kind: 'message', text: 'revise the proposal' });
-  await finished();
-  expect(await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 })).toMatchObject({ kind: 'error', code: 'stale_summary' });
-  expect(doubles.register).not.toHaveBeenCalled();
-});
-
-it.each([7, 9])('registers all %i large constraints under the same reserved ID and returns that registration on repeated approval', async (count) => {
-  record.pending!.summary = { ...record.pending!.summary, startBranch: 'main', integrationBranch: 'release',
-    outOfScope: ['CSV; 通知', 'CSV","通知', 'CSV', 'CSV'],
-    constraints: Array.from({ length: count }, (_, index) => String(index).padEnd(128 * 1024, 'a')) };
-  store.write(record);
-  const opened = await open();
-  await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 }); await finished();
-  const reservation = store.read(record.id, record.assignment)!.approval!;
-  expect(doubles.register).toHaveBeenCalledExactlyOnceWith({ ...record.pending!.summary, cwd: repository, id: reservation.goalId }, expect.any(AbortSignal));
-  expect(new GoalStore(repository).find(reservation.goalId)).toMatchObject(record.pending!.summary);
-  await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 }); await finished();
-  expect(doubles.register).toHaveBeenCalledOnce();
-  expect(outputs.at(-1)).toMatchObject({ kind: 'result', result: { kind: 'goal_registered', goal: { id: reservation.goalId } } });
-});
-
-it('withdraws immediately and refuses an old withdrawal without clearing a newer proposal', async () => {
-  const opened = await open();
-  await submit(opened.attachmentId, { kind: 'dismiss_summary', revision: 4 }); await finished();
-  expect(store.read(record.id, record.assignment)?.pending).toBeNull();
-  expect(await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 })).toMatchObject({ kind: 'error', code: 'stale_summary' });
-  execute.mockResolvedValueOnce({ message: 'New proposal', summary: { ...record.pending!.summary, repositoryDirectory: repository },
-    sessionId: 'human-session', assignment: record.assignment });
-  await submit(opened.attachmentId, { kind: 'message', text: 'Replace the proposal' }); await finished();
-  const latest = store.read(record.id, record.assignment)!.pending;
-  expect(await submit(opened.attachmentId, { kind: 'dismiss_summary', revision: 4 })).toMatchObject({ kind: 'error', code: 'stale_summary' });
-  expect(store.read(record.id, record.assignment)?.pending).toEqual(latest);
-  expect(doubles.register).not.toHaveBeenCalled();
-});
-
-it('persists its reservation before acceptance and registration, retains it after failure and reuses its ID', async () => {
-  const opened = await open();
-  doubles.register.mockImplementationOnce(async ({ id }: { id: string }) => {
-    expect(store.read(record.id, record.assignment)).toMatchObject({ approval: { state: 'reserved', revision: 4, goalId: id }, pending: record.pending });
-    throw new Error('creation failed');
+  const plan: ManagerConversationPlan = { ctx: { provider: makeProvider({ setup: () => ({ call }) }),
+    providerType: 'mock', model: undefined, lang: 'en' }, strategy: { systemPrompt: 'original system prompt' } };
+  vi.spyOn(conversationPlan, 'createManagerConversationPlan').mockImplementation(() => plan);
+  vi.spyOn(managerMcp, 'connectManagerMcp').mockResolvedValue({
+    client: new Client({ name: 'fixture', version: 'test' }), servers: {}, async dispose() {},
   });
-  expect((await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 })).kind).toBe('accepted');
-  expect(store.read(record.id, record.assignment)!.approval).toMatchObject({ state: 'reserved', revision: 4 });
-  await finished();
-  const reserved = store.read(record.id, record.assignment)!.approval!;
-  expect(await submit(opened.attachmentId, { kind: 'message', text: 'replace' })).toMatchObject({ kind: 'error', code: 'registration_recovery' });
-  expect((await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 })).kind).toBe('accepted');
-  await finished();
-  expect(doubles.register.mock.calls.map(([input]) => input.id)).toEqual([reserved.goalId, reserved.goalId]);
-  expect(store.read(record.id, record.assignment)).toMatchObject({ approval: { ...reserved, state: 'registered' }, pending: null, running: null });
-  await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 });
-  await finished();
-  expect(doubles.register).toHaveBeenCalledTimes(2);
-  expect(outputs.filter((output) => output.kind === 'result' && output.result.kind === 'goal_registered')).toHaveLength(2);
-});
-
-it('does not accept or register when the reservation write fails', async () => {
-  const opened = await open();
-  vi.spyOn(ConversationStore.prototype, 'write').mockImplementationOnce(() => { throw new Error('disk failure'); });
-  expect(await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 })).toMatchObject({ kind: 'error', code: 'storage_error' });
-  expect(store.read(record.id, record.assignment)!.approval).toBeNull();
-  expect(doubles.register).not.toHaveBeenCalled();
-  expect(await state(await service.snapshot(opened.attachmentId))).toMatchObject({ running: null, pending: record.pending });
-});
-
-it.each(['abort_turn', 'close'] as const)('keeps the reserved proposal when %s interrupts registration, then registers the same ID on reapproval', async (kind) => {
-  const opened = await open();
-  let release!: () => void;
-  let registrationSignal: AbortSignal | undefined;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  doubles.register.mockImplementationOnce(async (_input, signal: AbortSignal) => {
-    registrationSignal = signal;
-    await gate;
-    signal.throwIfAborted();
-    throw new Error('An aborted registration must not reach creation');
-  });
-  const accepted = await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 });
-  if (accepted.kind !== 'accepted') throw new Error('Approval was not accepted');
-  let closing: Promise<void> | undefined;
-  try {
-    await vi.waitFor(() => expect(registrationSignal).toBeDefined());
-    if (kind === 'close') closing = service.close();
-    else expect(await submit(opened.attachmentId, { kind: 'abort_turn', operationId: accepted.operationId })).toEqual(accepted);
-    expect(registrationSignal!.aborted).toBe(true);
-    expect(service.activeOperationCount).toBe(1);
-  } finally { release(); }
-  await closing;
-  await finished();
-  const saved = store.read(record.id, record.assignment)!;
-  expect(saved).toMatchObject({ revision: 4, pending: record.pending, approval: { state: 'reserved', revision: 4 }, running: null });
-  expect(outputs).toContainEqual(expect.objectContaining({ kind: 'result', operationId: accepted.operationId, result: expect.objectContaining({ kind: 'error' }) }));
-  expect(new GoalStore(repository).find(saved.approval!.goalId)).toBeUndefined();
-  if (kind === 'close') service = createConversationService({ configDirectory: directory, owner,
-    runtime: { resolve: resolveRuntime, close: closeRuntime }, onDomainChange: vi.fn() });
-  const reopened = await open();
-  const registeredBefore = doubles.register.mock.calls.length;
-  expect(await submit(reopened.attachmentId, { kind: 'approve_summary', revision: 3 })).toMatchObject({ kind: 'error' });
-  expect(doubles.register).toHaveBeenCalledTimes(registeredBefore);
-  expect((await submit(reopened.attachmentId, { kind: 'approve_summary', revision: 4 })).kind).toBe('accepted');
-  await finished();
-  expect(doubles.register.mock.calls.map(([input]) => input.id)).toEqual([saved.approval!.goalId, saved.approval!.goalId]);
-  expect(store.read(record.id, record.assignment)).toMatchObject({ revision: 5, pending: null, approval: { ...saved.approval, state: 'registered' }, running: null });
-  expect(outputs).toContainEqual(expect.objectContaining({ kind: 'result', result: expect.objectContaining({ kind: 'goal_registered', goal: expect.objectContaining({ id: saved.approval!.goalId }) }) }));
-});
-
-it('preserves the registered receipt and result when approval is cancelled after goal publication', async () => {
-  const opened = await open();
-  let release!: () => void;
-  let goalId: string | undefined;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  doubles.register.mockImplementationOnce(async ({ id }: { id: string }) => {
-    const goal = saveGoal(id);
-    goalId = id;
-    await gate;
-    return goal;
-  });
-  const accepted = await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 });
-  if (accepted.kind !== 'accepted') throw new Error('Approval was not accepted');
-  try {
-    await vi.waitFor(() => expect(goalId).toBeDefined());
-    await submit(opened.attachmentId, { kind: 'abort_turn', operationId: accepted.operationId });
-  } finally { release(); }
-  await finished();
-  expect(store.read(record.id, record.assignment)).toMatchObject({ pending: null, approval: { state: 'registered', goalId }, running: null });
-  expect(outputs).toContainEqual(expect.objectContaining({ kind: 'result', operationId: accepted.operationId,
-    result: expect.objectContaining({ kind: 'goal_registered', goal: expect.objectContaining({ id: goalId }) }) }));
-});
-
-it('keeps an accepted operation running after detach and exposes its saved pending on reconnect', async () => {
-  let finish!: (value: Awaited<ReturnType<typeof execute>>) => void;
-  execute.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  let runtime = createConversationRuntime(directory);
+  resolveRuntime.mockImplementation((...args: Parameters<typeof runtime.resolve>) => runtime.resolve(...args));
   try {
     const first = await open();
-    const second = await open();
-    const accepted = await submit(first.attachmentId, { kind: 'message', text: 'first' });
-    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
-    const busyCommands: Parameters<typeof service.submit>[0]['command'][] = [
-      { kind: 'message', text: 'rejected' }, { kind: 'approve_summary', revision: 4 }, { kind: 'dismiss_summary', revision: 4 },
-      { kind: 'answer_question', target: { goalId: goalRecord().id, repositoryDirectory: repository },
-        questionId: '650e8400-e29b-41d4-a716-446655440001', answer: { text: 'CSV' } },
-      ...(['pause_goal', 'resume_goal', 'abort_goal'] as const).map((kind) => ({ kind, goalId: goalRecord().id })),
-    ];
-    for (const command of busyCommands) expect(await submit(second.attachmentId, command))
-      .toEqual({ kind: 'busy', operationId: 'operationId' in accepted ? accepted.operationId : '' });
-    service.detach(first.attachmentId); service.detach(second.attachmentId);
-    expect(execute.mock.calls[0]![0].abortSignal.aborted).toBe(false);
-    expect(service.activeOperationCount).toBe(1);
-    finish({ message: 'done', summary: { ...record.pending!.summary, repositoryDirectory: repository }, sessionId: 'finished-session', assignment: record.assignment });
-    await finished();
-    const reopened = await open();
-    expect(await state(reopened.read)).toMatchObject({ conversationId: record.id, revision: 5, pending: { revision: 5, summary: record.pending!.summary }, running: null });
+    await first.submit('first request');
+    await fixture.settled();
+    const saved = (await fixture.store.read(id))!.state.session;
+    expect(saved.sessionId).toBe('session-1');
+    expect(saved.contextKey).toBeDefined();
+    await fixture.close();
+    await runtime.close();
+    if (changed) plan.strategy.systemPrompt = 'changed system prompt';
+    runtime = createConversationRuntime(directory);
+    fixture = await conversationDaemon(directory, { resolve: resolveRuntime, async close() {} });
+    const next = await open();
+    await next.submit('request after restart');
+    await fixture.settled();
+    expect(call.mock.calls[1]![1].sessionId).toBe(changed ? undefined : 'session-1');
+    const restored = (await fixture.store.read(id))!.state.session;
+    expect(restored.sessionId).toBe('session-2');
+    if (changed) expect(restored.contextKey).not.toBe(saved.contextKey);
+    else expect(restored.contextKey).toBe(saved.contextKey);
+  } finally { await runtime.close(); }
+});
+
+it.each(['legacy', 'legacy-without-question', 'structured', 'unidentified', 'mismatched-request', 'director', 'quoted', 'invalid-payload', 'other-director', 'other-workspace', 'question-mismatch', 'wrong-time'] as const)(
+  'redelivers a saved %s event with its original answer or director provenance', async (format) => {
+    const directory = getGlobalConfigDir();
+    const workspace = await createWorkspace({ globalConfigDirectory: directory, name: 'Workspace', repositoryDirectories: [] });
+    const owner = { kind: 'workspace' as const, workspaceId: workspace.id };
+    const targetId = conversationId(owner);
+    await fixture.conversations.ensure(owner);
+    await fixture.close();
+    const inquiryAnswer = { questionId: randomUUID(),
+      ...(format === 'legacy-without-question' ? {} : { question: 'Which goal should wait?' }),
+      answer: { text: 'X は待ってください。\nY は進めてください。', source: 'slack' as const, answeredAt: '2026-11-03T00:00:00Z' } };
+    const legacyText = `A person answered a standalone inquiry. ${JSON.stringify(inquiryAnswer)}`;
+    const isAnswer = ['legacy', 'legacy-without-question', 'structured'].includes(format);
+    const event = { kind: 'director_message' as const,
+      directorConversationId: format === 'other-director' ? 'other-director' : conversationId({ kind: 'daemon' }),
+      text: format === 'structured' ? 'A person answered a standalone inquiry.'
+        : format === 'director' ? 'Inspect the current work.' : format === 'quoted' ? `Quoted: ${legacyText}`
+          : format === 'invalid-payload' ? `${legacyText}\nPlease inspect.` : legacyText,
+      ...(format === 'structured' ? { inquiryAnswer } : {}),
+    };
+    const eventId = format === 'unidentified' ? randomUUID()
+      : `workspace-answer-${format === 'other-workspace' ? randomUUID() : workspace.id}-${format === 'question-mismatch' ? randomUUID() : inquiryAnswer.questionId}`;
+    const saved = { ...input(eventId, targetId, 'other'),
+      requestId: format === 'mismatched-request' ? randomUUID() : eventId,
+      source: 'director', occurredAt: format === 'wrong-time' ? '2026-11-04T00:00:00Z' : inquiryAnswer.answer.answeredAt, event,
+      operationId: randomUUID(), acceptedSequence: 1, lane: 'other' };
+    const eventsDirectory = join(directory, 'daemon-events');
+    await mkdir(eventsDirectory, { recursive: true, mode: 0o700 });
+    const eventPath = join(eventsDirectory, `${createHash('sha256').update(eventId).digest('hex')}.json`);
+    await writeFile(eventPath,
+      JSON.stringify({ state: 'queued', event: saved }), { mode: 0o600 });
+    fixture = await conversationDaemon(directory, { resolve: resolveRuntime, async close() {} });
+    await fixture.settled();
     expect(execute).toHaveBeenCalledOnce();
-    expect(doubles.register).not.toHaveBeenCalled();
-  } finally {
-    finish?.({ message: 'done', summary: null, sessionId: 'finished-session', assignment: record.assignment });
+    const prompt = execute.mock.calls[0]![0].prompt;
+    const body = JSON.parse(prompt.slice(prompt.lastIndexOf('\n\n') + 2));
+    expect(body).toEqual(isAnswer ? { goalId: null, ...inquiryAnswer }
+      : { text: event.text, origin: 'unknown', directorConversationId: event.directorConversationId });
+    const stored = EventRecordSchema.parse(JSON.parse(await readFile(eventPath, 'utf8')));
+    expect(stored.state).toBe('settled');
+    expect(stored.event.event).toEqual(isAnswer ? { ...event, inquiryAnswer } : event);
+  },
+);
+
+it('preserves a newly accepted director message matching the legacy answer text through saving and restart', async () => {
+  const directory = getGlobalConfigDir();
+  const workspace = await createWorkspace({ globalConfigDirectory: directory, name: 'Workspace', repositoryDirectories: [] });
+  const owner = { kind: 'workspace' as const, workspaceId: workspace.id };
+  const targetId = conversationId(owner);
+  await fixture.conversations.ensure(owner);
+  const inquiryAnswer = { questionId: randomUUID(), question: 'Which goal should wait?',
+    answer: { text: 'Wait for X.', source: 'tui', answeredAt: '2026-11-03T00:00:00Z' } };
+  const event = { kind: 'director_message' as const, origin: 'director' as const, directorConversationId: conversationId({ kind: 'daemon' }),
+    text: `A person answered a standalone inquiry. ${JSON.stringify(inquiryAnswer)}` };
+  const eventId = randomUUID();
+  accepted(await fixture.dispatcher.accept({ ...input(eventId, targetId, 'other'), source: 'director', event }));
+  await fixture.settled();
+  expect(execute).toHaveBeenCalledOnce();
+  const prompt = execute.mock.calls[0]![0].prompt;
+  expect(JSON.parse(prompt.slice(prompt.lastIndexOf('\n\n') + 2)))
+    .toEqual({ text: event.text, origin: event.origin, directorConversationId: event.directorConversationId });
+  const eventPath = join(directory, 'daemon-events', `${createHash('sha256').update(eventId).digest('hex')}.json`);
+  const saved = JSON.parse(await readFile(eventPath, 'utf8'));
+  expect(saved.state).toBe('settled');
+  expect(saved.event.event).toEqual(event);
+  expect(saved.result.event.event).toEqual(event);
+  await fixture.close();
+  fixture = await conversationDaemon(directory, { resolve: resolveRuntime, async close() {} });
+  const duplicate = await fixture.events.accept(saved.event);
+  expect(duplicate).toEqual({ kind: 'duplicate', state: 'settled', event: saved.event });
+});
+
+it.each(['legacy', 'without-question', 'workspace', 'reassigned-to-workspace', 'route-removed', 'wrong-hash', 'other-repository', 'other-workspace', 'question-mismatch', 'other-inbox-root', 'other-source', 'unidentified', 'mismatched-request', 'director-origin', 'other-director', 'invalid-payload'] as const)(
+  'restores an old standalone inbox answer through storage and restart (%s)', async (format) => {
+    const directory = getGlobalConfigDir();
+    const registration = await registerProject({ globalConfigDirectory: directory, projectDirectory: repository, command: 'manager', managerUsed: true });
+    const files = new DaemonPersistedFiles(directory);
+    const questionId = randomUUID();
+    const answer = { text: 'X は待ってください。\nY は進めてください。', source: 'slack' as const, answeredAt: '2026-11-03T00:00:00Z' };
+    await files.saveStandaloneInquiryAnswer(repository, questionId, 'Which goal should wait?', answer);
+    const inboxDirectory = await files.inboxDirectory(repository);
+    const [name] = await readdir(inboxDirectory);
+    const inbox = (await files.readInboxEvent(repository, name!))!;
+    expect(inbox).toMatchObject({ kind: 'answer', goalId: null, questionId, answer });
+    let targetId = id;
+    const targetRepository = format === 'other-repository' || format === 'other-workspace' ? join(directory, 'other-repository') : repository;
+    if (targetRepository !== repository) {
+      await mkdir(join(targetRepository, '.takt'), { recursive: true });
+      await writeFile(join(targetRepository, '.takt', 'config.yaml'), 'provider: mock\nlanguage: en\nmanager:\n  auto_run: false\n');
+      await registerProject({ globalConfigDirectory: directory, projectDirectory: targetRepository, command: 'manager', managerUsed: true });
+    }
+    if (format === 'other-repository') {
+      const record = conversationRecord(targetRepository);
+      await fixture.store.create(record);
+      targetId = record.id;
+    } else if (format === 'workspace' || format === 'other-workspace') {
+      const workspace = await createWorkspace({ globalConfigDirectory: directory, name: 'Inbox destination', repositoryDirectories: [] });
+      await writeFile(join(directory, 'workspaces', workspace.id, 'workspace.json'), JSON.stringify({
+        ...workspace, repositoryDirectories: [targetRepository],
+      }));
+      const owner = { kind: 'workspace' as const, workspaceId: workspace.id };
+      await fixture.conversations.ensure(owner);
+      targetId = conversationId(owner);
+    }
+    const otherInboxDirectory = format === 'other-inbox-root'
+      ? await new DaemonPersistedFiles(join(directory, 'other-config')).inboxDirectory(repository) : undefined;
+    const inquiryAnswer = { questionId: format === 'question-mismatch' ? randomUUID() : questionId,
+      ...(format === 'without-question' ? {} : { question: 'Which goal should wait?' }), answer };
+    const legacyEvent = { kind: 'director_message' as const,
+      directorConversationId: format === 'other-director' ? 'other-director' : conversationId({ kind: 'daemon' }),
+      text: `A person answered a standalone inquiry. ${JSON.stringify(inquiryAnswer)}${format === 'invalid-payload' ? '\nInspect this.' : ''}`,
+      ...(format === 'director-origin' ? { origin: 'director' as const } : {}),
+    };
+    await receiveInboxChange({ path: join(inboxDirectory, name!), removed: false, generation: 'answer', value: inbox,
+      target: { kind: 'inbox', targetId: repository, directory: inboxDirectory, generation: 'repository', conversationId: id } }, files, fixture.conversations, {
+      async accept(input) {
+        expect(input).toMatchObject({ source: 'run', requestId: input.eventId, conversationId: id, occurredAt: inbox.createdAt });
+        expect(input.eventId).toBe(`standalone-answer-${createHash('sha256').update(JSON.stringify([inboxDirectory, questionId])).digest('hex')}`);
+        // 旧 producer が保存した本文だけのイベントを、未処理のまま残す。
+        const eventId = format === 'unidentified' ? randomUUID() : format === 'wrong-hash' ? `standalone-answer-${'0'.repeat(64)}`
+          : otherInboxDirectory === undefined ? input.eventId
+            : `standalone-answer-${createHash('sha256').update(JSON.stringify([otherInboxDirectory, questionId])).digest('hex')}`;
+        const saved = { ...input, eventId, conversationId: targetId,
+          requestId: format === 'mismatched-request' ? randomUUID() : eventId,
+          source: format === 'other-source' ? 'director' as const : input.source,
+          event: legacyEvent, operationId: randomUUID(), acceptedSequence: 1, lane: 'other' as const };
+        expect(await fixture.events.accept(saved)).toEqual({ kind: 'stored' });
+        return { kind: 'accepted', eventId: saved.eventId, operationId: saved.operationId, acceptedSequence: saved.acceptedSequence };
+      },
+    });
+    const [eventName] = (await readdir(join(directory, 'daemon-events'))).filter((entry) => entry.endsWith('.json'));
+    const eventPath = join(directory, 'daemon-events', eventName!);
+    expect(JSON.parse(await readFile(eventPath, 'utf8'))).toMatchObject({ state: 'queued', event: { event: legacyEvent } });
+    await fixture.close();
+    if (format === 'reassigned-to-workspace') {
+      const owner = { kind: 'repository' as const, repositoryDirectory: repository };
+      expect(await new DaemonRouting(directory).resolve(owner)).toEqual(owner);
+      const workspace = await createWorkspace({ globalConfigDirectory: directory, name: 'Reassigned destination', repositoryDirectories: [] });
+      await writeFile(join(directory, 'workspaces', workspace.id, 'workspace.json'), JSON.stringify({
+        ...workspace, repositoryDirectories: [repository],
+      }));
+      expect(await new DaemonRouting(directory).resolve(owner)).toEqual({ kind: 'workspace', workspaceId: workspace.id });
+      expect((await fixture.store.read(id))!.state.assignment).toEqual(owner);
+    } else if (format === 'route-removed') {
+      await unlink(join(directory, 'projects', `${registration.locationId}.json`));
+      expect(await new DaemonRouting(directory).permits({ kind: 'repository', repositoryDirectory: repository }, id)).toBe(false);
+    }
+    fixture = await conversationDaemon(directory, { resolve: resolveRuntime, async close() {} });
+    await fixture.settled();
+    expect(execute).toHaveBeenCalledOnce();
+    const prompt = execute.mock.calls[0]![0].prompt;
+    const isAnswer = format === 'legacy' || format === 'without-question' || format === 'workspace';
+    expect(JSON.parse(prompt.slice(prompt.lastIndexOf('\n\n') + 2))).toEqual(isAnswer ? { goalId: null, ...inquiryAnswer }
+      : { text: legacyEvent.text, origin: legacyEvent.origin ?? 'unknown', directorConversationId: legacyEvent.directorConversationId });
+    const settled = JSON.parse(await readFile(eventPath, 'utf8'));
+    expect(settled.state).toBe('settled');
+    expect(settled.event.event).toEqual(isAnswer ? { ...legacyEvent, inquiryAnswer } : legacyEvent);
+    expect(settled.result.event.event).toEqual(settled.event.event);
+    await fixture.close();
+    // 旧版で結果まで保存された本文も、同じ同一性検証を通して再読込する。
+    await writeFile(eventPath, JSON.stringify({ ...settled, event: { ...settled.event, event: legacyEvent },
+      result: { ...settled.result, event: { ...settled.result.event, event: legacyEvent } } }), { mode: 0o600 });
+    fixture = await conversationDaemon(directory, { resolve: resolveRuntime, async close() {} });
+    await fixture.settled();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(await fixture.events.accept(settled.event)).toEqual({ kind: 'duplicate', state: 'settled', event: settled.event });
+  },
+);
+
+it('returns acceptance for a second screen while the same conversation turn is paused', async () => {
+  const entered = deferred<void>(); const release = deferred<void>();
+  execute.mockImplementationOnce(async (value) => { entered.resolve(); await release.promise; return { message: 'first reply', summary: null, sessionId: 'persisted-session', assignment: value.assignment }; });
+  const first = await open(); const second = await open();
+  await first.submit('first'); await entered.promise;
+  expect(await second.submit('second')).toMatchObject({ kind: 'accepted', acceptedSequence: 2 });
+  expect(execute).toHaveBeenCalledOnce();
+  const snapshot = await second.read;
+  expect(snapshot.conversationId).toBe(id);
+  release.resolve();
+  await second.completed.promise;
+  await fixture.dispatcher.drain();
+});
+
+it('uses the same session for a director message and preserves the human proposal', async () => {
+  const port = await open();
+  const event = { kind: 'director_message' as const, directorConversationId: conversationId({ kind: 'daemon' }), text: 'inspect current work' };
+  accepted(await fixture.dispatcher.accept({ ...input('event', id, 'other'), event }));
+  await port.completed.promise;
+  await fixture.dispatcher.drain();
+  expect(execute.mock.calls[0]![0].sessionId).toBe('provider-session');
+  expect((await fixture.store.read(id))!.state).toMatchObject({ revision: 4, pending: { revision: 4 } });
+});
+
+it('starts each patrol with business context in a disposable session and then resumes the human conversation', async () => {
+  const goal = await new GoalStore(repository).create(goalRecord());
+  const before = (await fixture.store.read(id))!.state;
+  const call = vi.fn<ProviderAgent['call']>().mockImplementation(async () => ({
+    persona: 'manager', status: 'done', content: '', timestamp: new Date(),
+    structuredOutput: { message: 'Patrol complete', summary: null }, sessionId: `session-${call.mock.calls.length}`,
+  }));
+  const executor = createManagerTurnExecutor(repository, { ctx: {
+    provider: makeProvider({ setup: () => ({ call }) }), providerType: 'mock', model: undefined, lang: 'en',
+  }, strategy: { systemPrompt: 'manager' } });
+  resolveRuntime.mockResolvedValue({ provider: 'mock', model: null, language: 'en', contextKey: 'test', executor });
+  const port = await open();
+  for (let index = 0; index < 2; index++) {
+    accepted(await fixture.dispatcher.accept({ ...input(`patrol-${index}`, id, 'other'), event: {
+      kind: 'patrol', repositoryDirectory: repository, goalIds: [goal.id],
+    } }));
+    await fixture.settled();
+    expect(call).toHaveBeenCalledTimes(index + 1);
+    const [prompt, options] = call.mock.calls[index]!;
+    expect(options.sessionId).toBeUndefined();
+    expect(options.callerManagedSession).toBe(true);
+    expect(prompt).toContain(before.pending!.summary.objective);
+    expect(prompt).toContain(goal.objective);
+    expect(prompt).toContain(repository);
+    expect((await fixture.store.read(id))!.state).toMatchObject({ session: before.session, pending: before.pending });
   }
+  expect(port.outputs.filter((output) => output.kind === 'result').map((output) => output.result))
+    .toEqual([{ kind: 'reply', message: 'Patrol complete' }, { kind: 'reply', message: 'Patrol complete' }]);
+  await port.submit('continue the conversation');
+  await fixture.settled();
+  expect(call).toHaveBeenCalledTimes(3);
+  expect(humanTurnText(call.mock.calls[2]![0])).toBe('continue the conversation');
+  expect(call.mock.calls[2]![1].sessionId).toBe(before.session.sessionId);
 });
 
-it.each([
-  { pid: 999, startTime: 'daemon-A' }, { pid: owner.pid, startTime: 'daemon-A' },
-  { pid: owner.pid, startTime: owner.identity.startTime },
-])('repairs restored running ownership %j without replaying input or losing the reservation', async ({ pid, startTime }) => {
-  record.running = { operationId: '22222222-2222-4222-8222-222222222222', kind: 'approve_summary', owner: { pid, identity: { startTime } } };
-  record.approval = { state: 'reserved', revision: 4, goalId: '11111111-1111-4111-8111-111111111111', repositoryDirectory: repository };
-  store.write(record);
-  const opened = await open();
-  expect(await state(opened.read)).toMatchObject({ interrupted: true, running: null, pending: record.pending, approval: record.approval });
-  expect(store.read(record.id, record.assignment)).toMatchObject({ sessionId: null, running: null, pending: record.pending, approval: record.approval });
-  expect(execute).not.toHaveBeenCalled();
-  expect((await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 })).kind).toBe('accepted');
-  await finished();
+it('keeps an accepted message alive after its last attachment detaches', async () => {
+  const entered = deferred<void>(); const release = deferred<void>();
+  execute.mockImplementationOnce(async (value) => { entered.resolve(); await release.promise; return { message: 'done', summary: null, sessionId: 'persisted-session', assignment: value.assignment }; });
+  const port = await open(); await port.submit('continue after detach'); await entered.promise;
+  fixture.input.detach(port.attachmentId); release.resolve();
+  // dispatcher の保存完了を明示的に待ち、表示配送には依存しない。
+  const saving = deferred<void>();
+  const apply = fixture.conversations.apply.bind(fixture.conversations);
+  vi.spyOn(fixture.conversations, 'apply').mockImplementation(async (result) => { await apply(result); saving.resolve(); });
+  await saving.promise; await fixture.dispatcher.drain();
+  expect((await fixture.store.read(id))!.state.session.sessionId).toBe('persisted-session');
 });
 
-it('rejects a mismatched conversation ID before reading or writing its record', async () => {
-  const read = vi.spyOn(ConversationStore.prototype, 'read');
-  const write = vi.spyOn(ConversationStore.prototype, 'write');
-  await expect(service.open({ conversationId: `manager-${'0'.repeat(64)}`, assignment: record.assignment,
-    binding: record.bindings[0]!, speaker: record.counterpart }, delivery)).rejects.toMatchObject({ code: 'invalid_assignment' });
-  expect(read).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled();
-});
-
-it('rechecks membership on the same loaded workspace before reserving or approving its earlier proposal', async () => {
-  const workspace = { kind: 'workspace' as const, workspaceId: '11111111-1111-4111-8111-111111111111' };
-  record.assignment = workspace; record.id = conversationId(workspace); store.write(record);
-  doubles.assignment.mockResolvedValue({ ...workspace, name: 'Workspace', repositoryDirectories: [repository] });
-  const opened = await open();
-  expect(await state(opened.read)).toMatchObject({ pending: record.pending, revision: 4 });
-  doubles.assignment.mockResolvedValue({ ...workspace, name: 'Workspace', repositoryDirectories: [] });
-  expect(await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 })).toMatchObject({ kind: 'error', code: 'invalid_assignment' });
-  expect(store.read(record.id, workspace)).toMatchObject({ approval: null, pending: record.pending, revision: 4, running: null });
-  expect(doubles.register).not.toHaveBeenCalled();
-});
-
-it('keeps a registered receipt without recreating its removed goal', async () => {
-  record.pending = null; record.revision = 5;
-  record.approval = { state: 'registered', revision: 4, goalId: '11111111-1111-4111-8111-111111111111', repositoryDirectory: repository };
-  store.write(record);
-  const opened = await open();
-  expect((await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 })).kind).toBe('accepted');
-  await finished();
-  expect(outputs).toContainEqual(expect.objectContaining({ kind: 'result', result: expect.objectContaining({ kind: 'error', code: 'registration_recovery' }) }));
-  expect(doubles.register).not.toHaveBeenCalled();
-  expect(store.read(record.id, record.assignment)!.approval).toEqual(record.approval);
-});
-
-it('rejects an unsafe stored proposal before reserving an ID or registering a goal', async () => {
-  record.pending!.summary.objective = 'unsafe\u001b[31m'; store.write(record);
-  const opened = await open();
-  expect((await submit(opened.attachmentId, { kind: 'approve_summary', revision: 4 })).kind).toBe('error');
-  expect(store.read(record.id, record.assignment)!.approval).toBeNull(); expect(doubles.register).not.toHaveBeenCalled();
-});
-
-it('clears the persisted session when the model changes and again when the same runtime context changes', async () => {
-  const opened = await open();
-  resolveRuntime.mockResolvedValueOnce({ provider: 'mock', model: 'model-B', language: 'en', contextKey: 'context-B', executor: { execute } });
-  await submit(opened.attachmentId, { kind: 'message', text: 'model changed' }); await finished();
-  expect(execute.mock.calls[0]![0].sessionId).toBeUndefined();
-  expect(store.read(record.id, record.assignment)).toMatchObject({ model: 'model-B', sessionId: 'next-session' });
-  resolveRuntime.mockResolvedValueOnce({ provider: 'mock', model: 'model-B', language: 'en', contextKey: 'context-C', executor: { execute } });
-  await submit(opened.attachmentId, { kind: 'message', text: 'context changed' }); await finished();
-  expect(execute.mock.calls[1]![0].sessionId).toBeUndefined();
-});
-
-it('drains an in-progress admission during shutdown without accepting or invoking the provider afterwards', async () => {
-  const opened = await open();
-  let finishResolution!: (value: ManagerAssignment) => void;
-  doubles.assignment.mockImplementationOnce(() => new Promise((resolve) => { finishResolution = resolve; }));
-  const submitting = submit(opened.attachmentId, { kind: 'message', text: 'races with shutdown' });
-  service.stopAccepting();
-  let closed = false;
-  const closing = service.close().then(() => { closed = true; });
-  try {
-    await Promise.resolve(); expect(closed).toBe(false);
-  } finally { finishResolution(assignment); }
-  expect(await submitting).toMatchObject({ kind: 'error', code: 'shutting_down' });
-  await closing; expect(execute).not.toHaveBeenCalled(); expect(store.read(record.id, record.assignment)!.running).toBeNull();
-});
-
-it.each(['message', 'approve_summary'] as const)('refuses %s at revision exhaustion without wrapping or creating a reservation', async (kind) => {
-  record.revision = Number.MAX_SAFE_INTEGER; record.pending!.revision = record.revision; store.write(record);
-  const opened = await open();
-  const result = await submit(opened.attachmentId, kind === 'message' ? { kind, text: 'new input' } : { kind, revision: record.revision });
-  expect(result.kind).toBe('error'); expect(service.activeOperationCount).toBe(0);
-  expect(store.read(record.id, record.assignment)).toMatchObject({ revision: Number.MAX_SAFE_INTEGER, pending: record.pending, approval: null, running: null });
-  expect(execute).not.toHaveBeenCalled(); expect(doubles.register).not.toHaveBeenCalled();
-});
-
-it('keeps a failed session invalidation unavailable until executor cleanup has finished', async () => {
-  const opened = await open();
-  let release!: () => void; let cleaning = false;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  const write = ConversationStore.prototype.write;
-  let fail = true;
-  vi.spyOn(ConversationStore.prototype, 'write').mockImplementation(function (this: ConversationStore, value) {
-    if (fail && value.sessionId === null) { fail = false; throw new Error('invalidation write failed'); }
-    return write.call(this, value);
-  });
-  execute.mockImplementationOnce(async (input) => {
-    try { await input.recovery!.invalidateSession(); return { message: 'unexpected', summary: null, sessionId: undefined, assignment: record.assignment }; }
-    finally { cleaning = true; await gate; }
-  });
-  try {
-    await submit(opened.attachmentId, { kind: 'message', text: 'resume' });
-    await vi.waitFor(() => expect(cleaning).toBe(true));
-    await expect(service.snapshot(opened.attachmentId)).rejects.toMatchObject({ code: 'storage_error' });
-    expect(service.activeOperationCount).toBe(1);
-    expect(await submit(opened.attachmentId, { kind: 'message', text: 'cannot overlap cleanup' })).toMatchObject({ code: 'storage_error' });
-  } finally { release(); }
-  await finished();
-  expect(store.read(record.id, record.assignment)).toMatchObject({ running: null, sessionId: null });
+it('does not execute again when result persistence fails and only retries the saved outcome', async () => {
+  const port = await open(); const failure = new Error('disk unavailable');
+  const save = vi.spyOn(fixture.events, 'saveResult').mockRejectedValueOnce(failure);
+  const failed = deferred<void>();
+  const before = fixture.failures.push.bind(fixture.failures);
+  vi.spyOn(fixture.failures, 'push').mockImplementation((...errors) => { failed.resolve(); return before(...errors); });
+  expect(await port.submit('one call')).toMatchObject({ kind: 'accepted' });
+  await failed.promise;
+  expect(save).toHaveBeenCalledOnce(); expect(execute).toHaveBeenCalledOnce();
+  await fixture.dispatcher.retryStorage(); await port.completed.promise;
   expect(execute).toHaveBeenCalledOnce();
 });
 
-it('holds a failed terminal save unavailable and recovers persistence before accepting another operation', async () => {
-  const opened = await open();
-  const write = ConversationStore.prototype.write;
-  let fail = true;
-  vi.spyOn(ConversationStore.prototype, 'write').mockImplementation(function (this: ConversationStore, value) {
-    if (fail && value.running === null) throw new Error('terminal write failed');
-    return write.call(this, value);
-  });
-  await submit(opened.attachmentId, { kind: 'message', text: 'first' });
-  await vi.waitFor(() => expect(outputs).toContainEqual(expect.objectContaining({ kind: 'result', result: expect.objectContaining({ code: 'storage_error' }) })));
-  expect(service.activeOperationCount).toBe(1);
-  expect(await submit(opened.attachmentId, { kind: 'message', text: 'unavailable' })).toMatchObject({ code: 'storage_error' });
-  fail = false;
-  expect(await state(await service.snapshot(opened.attachmentId))).toMatchObject({ running: null, revision: 5 });
-  expect(service.activeOperationCount).toBe(0);
-  await submit(opened.attachmentId, { kind: 'message', text: 'retry' }); await finished();
-  expect(execute).toHaveBeenCalledTimes(2);
+it('returns unavailable for disabled formal specs before resolving a failing runtime', async () => {
+  resolveRuntime.mockRejectedValue(new Error('runtime initialization failed'));
+  const port = await open();
+  const before = (await fixture.store.read(id))!.state;
+  await port.submit('/verify');
+  expect((await port.completed.promise).result).toMatchObject({ kind: 'reply', message: expect.stringContaining('/verify') });
+  await fixture.dispatcher.drain();
+  expect(resolveRuntime).not.toHaveBeenCalled();
+  expect(execute).not.toHaveBeenCalled();
+  expect((await fixture.store.read(id))!.state).toEqual(before);
 });
 
-it('keeps cancellation tied to its operation ID and refuses late output before admitting the next turn', async () => {
-  const opened = await open();
-  let release: (() => void) | undefined;
-  const defer = () => execute.mockImplementationOnce(() => new Promise((resolve) => {
-    release = () => resolve({ message: 'done', summary: { ...record.pending!.summary, repositoryDirectory: repository }, sessionId: 'new-session', assignment: record.assignment });
-  }));
-  try {
-    defer();
-    const first = await submit(opened.attachmentId, { kind: 'message', text: 'first' });
-    if (first.kind !== 'accepted') throw new Error('First turn was not accepted');
-    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
-    expect(await submit(opened.attachmentId, { kind: 'abort_turn', operationId: first.operationId })).toEqual(first);
-    expect(execute.mock.calls[0]![0].abortSignal.aborted).toBe(true);
-    expect(store.read(record.id, record.assignment)).toMatchObject({ revision: 6, pending: null, sessionId: null });
-    release!(); await finished();
-    expect(store.read(record.id, record.assignment)!.pending).toBeNull();
-    defer();
-    const second = await submit(opened.attachmentId, { kind: 'message', text: 'second' });
-    if (second.kind !== 'accepted') throw new Error('Second turn was not accepted');
-    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
-    expect(second.operationId).not.toBe(first.operationId);
-    expect(await submit(opened.attachmentId, { kind: 'abort_turn', operationId: first.operationId })).toMatchObject({ code: 'invalid_input' });
-    expect(execute.mock.calls[1]![0].abortSignal.aborted).toBe(false);
-    release!(); await finished();
-    expect(store.read(record.id, record.assignment)).toMatchObject({ revision: 7, pending: { revision: 7 }, running: null });
-  } finally { release?.(); }
-});
-
-it('finishes a captured repository turn after promotion, announces the changed assignment and requires reopening', async () => {
-  const opened = await open();
-  execute.mockImplementationOnce(async () => {
-    doubles.assignment.mockResolvedValue({ kind: 'workspace', workspaceId: '11111111-1111-4111-8111-111111111111', name: 'Workspace', repositoryDirectories: [repository] });
-    return { message: 'finished captured turn', summary: { ...record.pending!.summary, repositoryDirectory: repository }, sessionId: 'captured-session', assignment: record.assignment };
-  });
-  await submit(opened.attachmentId, { kind: 'message', text: 'promote' }); await finished();
-  expect(store.read(record.id, record.assignment)).toMatchObject({ assignment: record.assignment, revision: 5, pending: { revision: 5, repositoryDirectory: repository } });
-  expect(outputs).toContainEqual(expect.objectContaining({ kind: 'notice', message: expect.stringContaining('assignment') }));
-  expect(await submit(opened.attachmentId, { kind: 'approve_summary', revision: 5 })).toMatchObject({ code: 'invalid_assignment' });
-  expect(doubles.register).not.toHaveBeenCalled();
-});
-
-it.each(['fresh-session', undefined])('reconstructs an explicitly rejected provider session and stores its returned ID (%s)', async (freshSessionId) => {
+it('saves the invalidated generation session before retrying with business context and resumes the recovered session on the next turn', async () => {
+  await writeFile(join(repository, '.takt', 'config.yaml'), 'provider: mock\nlanguage: en\nassistant:\n  formal_spec: true\nmanager:\n  auto_run: false\n');
+  const before = (await fixture.store.read(id))!.state;
+  vi.mocked(runFormalSpecVerification).mockResolvedValue({ verdict: 'passed', verificationStarted: true,
+    quint: { status: 'passed' }, alloy: { status: 'passed' } });
   const call = vi.fn<ProviderAgent['call']>();
-  call.mockResolvedValueOnce({ persona: 'manager', status: 'error', content: '', timestamp: new Date(),
-    error: 'rejected resume', failureCategory: 'session_continuation_unsupported' });
+  const success = { persona: 'manager', status: 'done' as const, timestamp: new Date() };
+  call.mockResolvedValueOnce({ ...success, status: 'error', content: '', failureCategory: 'session_continuation_unsupported' });
   call.mockImplementationOnce(async (prompt, options) => {
-    expect(store.read(record.id, record.assignment)!.sessionId).toBeNull();
-    expect(options.sessionId).toBeUndefined();
-    const context = JSON.parse(prompt.split('Business context (not approval): ')[1]!);
-    expect(context.pending).toEqual(record.pending);
-    expect(context.assignment.repositoryDirectories).toEqual([repository]);
-    expect(context.goals.repositories[0].goals[0].id).toBe(goalRecord().id);
-    return { persona: 'manager', status: 'done', content: '', timestamp: new Date(),
-      structuredOutput: { message: 'fresh reply', summary: null }, sessionId: freshSessionId };
+    expect((await fixture.store.read(id))!.state.session.sessionId).toBeNull();
+    expect(options).toMatchObject({ cwd: repository, sessionId: undefined, callerManagedSession: true });
+    expect(prompt).toContain(before.pending!.summary.objective);
+    return { ...success, content: '```quint\nmodule csv {}\n```', sessionId: 'recovered' };
   });
-  saveGoal(goalRecord().id);
-  const executor = createManagerTurnExecutor(repository, { ctx: { providerType: 'mock', provider: makeProvider({ setup: () => ({ call }) }), model: 'model-A', lang: 'en' },
-    strategy: { systemPrompt: 'manager fixture' } });
-  execute.mockImplementation((value) => executor.execute(value));
-  const opened = await open();
-  await submit(opened.attachmentId, { kind: 'message', text: 'continue' });
-  await finished();
-  expect(call).toHaveBeenCalledTimes(2);
-  expect(call.mock.calls[0]![1].sessionId).toBe('provider-session');
-  expect(store.read(record.id, record.assignment)!.sessionId).toBe(freshSessionId ?? null);
-  expect(outputs).toContainEqual(expect.objectContaining({ kind: 'result', result: { kind: 'reply', message: 'fresh reply' } }));
-});
-
-it.each(([
-  ['codex', 'resume'], ['claude-terminal', 'resume'],
-  ['codex', 'generic'], ['claude-terminal', 'generic'],
-  ['codex', 'other-id'], ['claude-terminal', 'other-id'],
-  ['codex', 'body'], ['claude-terminal', 'body'],
-  ['codex', 'tool'], ['codex', 'second-failure'],
-] as const).flatMap(([providerType, outcome]) =>
-  (outcome === 'resume' ? ['current', 'goal-status', 'execution-status', 'task-status'] as const : ['current'] as const)
-    .map((state) => ({ providerType, outcome, state }))),
-)('connects $providerType rejection to durable recovery and delivery ($outcome, $state)', async ({ providerType, outcome, state: stateVariant }) => {
-  const savedId = '00000000-0000-4000-8000-000000000099';
-  record = { ...record, provider: providerType, sessionId: savedId };
-  store.write(record);
-  saveGoal(goalRecord().id);
-  let attempts = 0;
-  const prompts: string[] = [];
-  const ids: Array<string | undefined> = [];
-  const checkFresh = (prompt: string) => {
-    expect(store.read(record.id, record.assignment)!.sessionId).toBeNull();
-    const context = JSON.parse(prompt.split('Business context (not approval): ')[1]!);
-    expect(context.pending).toEqual(record.pending);
-    expect(context.assignment.repositoryDirectories).toEqual([repository]);
-    expect(context.goals.repositories[0].goals).toEqual([
-      expect.objectContaining({
-        id: goalRecord().id,
-        status: stateVariant === 'goal-status' ? 'created' : 'awaiting_merge',
-        executionStatus: stateVariant === 'execution-status' ? 'active' : 'paused',
-        taskCount: 1,
-        taskStates: stateVariant === 'task-status' ? { running: 1 } : { pending: 1 },
-      }),
-    ]);
-    expect(prompt).toContain('continue');
-  };
-  doubles.codexRun.mockImplementation(async (id: string | undefined, prompt: string) => {
-    attempts++;
-    prompts.push(prompt); ids.push(id);
-    if (id === undefined) checkFresh(prompt);
-    const failureId = outcome === 'other-id' ? 'another-session' : savedId;
-    const diagnostic = `Error: thread/resume: thread/resume failed: no rollout found for thread id ${failureId} (code -32600)`;
-    return { events: (async function* () {
-      if (outcome === 'body' || (attempts === 2 && outcome !== 'second-failure')) {
-        yield { type: 'thread.started', thread_id: id ?? 'fresh-session' };
-        yield { type: 'item.completed', item: { id: 'reply', type: 'agent_message', text: JSON.stringify({ message: outcome === 'body' ? 'session_continuation_unsupported' : 'fresh reply', summary: null }) } };
-        yield { type: 'turn.completed' };
-      } else {
-        if (outcome === 'tool') yield { type: 'item.started', item: { id: 'tool', type: 'command_execution', command: 'test' } };
-        throw new Error(outcome === 'generic' || attempts === 2 ? 'Authentication failed' : `Codex Exec exited with code 1: Reading prompt from stdin...\n${diagnostic}\n`);
-      }
-    })() };
-  });
-  let currentId: string | undefined;
-  let freshTerminalId: string | undefined;
-  let captures = 0;
-  doubles.tmux.mockImplementation((_command: string, args: string[], _options: unknown, callback: (error: Error | null, result?: { stdout: string; stderr: string }) => void) => {
-    let stdout = '';
-    if (args[0] === 'new-session') {
-      attempts++;
-      const resumeIndex = args.indexOf('--resume');
-      currentId = resumeIndex >= 0 ? args[resumeIndex + 1] : undefined;
-      ids.push(currentId);
-      if (currentId === undefined) freshTerminalId = args[args.indexOf('--session-id') + 1];
-      captures = 0;
-    } else if (args[0] === 'display-message') {
-      stdout = outcome === 'body' ? '0:' : '1:1';
-    } else if (args[0] === 'capture-pane') {
-      captures++;
-      stdout = currentId !== undefined && outcome !== 'body'
-        ? outcome === 'generic' ? 'Authentication failed' : `No conversation found with session ID: ${outcome === 'other-id' ? 'another-session' : currentId}`
-        : captures % 3 === 0 ? 'prompt pasted' : '❯';
-    }
-    callback(null, { stdout, stderr: '' });
-  });
-  doubles.transcript.mockImplementation(() => ({
-    sessionId: currentId ?? freshTerminalId,
-    assistantText: JSON.stringify({ message: outcome === 'body' ? 'session_continuation_unsupported' : 'fresh reply', summary: null }),
-    events: outcome === 'body' ? [
-      { type: 'tool_use', id: 'tool', tool: 'Bash', input: {} },
-      { type: 'tool_result', id: 'tool', content: `No conversation found with session ID: ${savedId}`, isError: false },
-    ] : [],
-  }));
-  const provider = providerType === 'codex' ? new CodexProvider() : new ClaudeTerminalProvider();
-  const executor = createManagerTurnExecutor(repository, { ctx: { providerType, provider, model: 'model-A', lang: 'en' },
-    ...(providerType === 'codex' ? { permissionJudge: { resolution: { provider: 'codex', model: undefined, providerOptions: {} }, language: 'en' as const, systemPrompt: 'judge', managerPersona: 'manager', managerPolicy: 'policy' } } : {}),
-    strategy: { systemPrompt: 'manager fixture' } });
-  execute.mockImplementation((value) => executor.execute(value));
-  resolveRuntime.mockResolvedValue({ provider: providerType, model: 'model-A', language: 'en', contextKey: 'context-A', executor: { execute } });
-  doubles.pasteInput.mockImplementation((text: string) => {
-    prompts.push(text);
-    if (currentId === undefined) checkFresh(text);
-  });
-  const opened = await open();
-  const currentGoal = GoalSchema.parse({
-    ...goalRecord(), ...record.pending!.summary,
-    status: stateVariant === 'goal-status' ? 'created' : 'awaiting_merge',
-    executionStatus: stateVariant === 'execution-status' ? 'active' : 'paused',
-    completion: {
-      goalBranch: goalRecord().branch, goalSha: 'a'.repeat(40), targetBranch: 'main',
-      summary: 'Ready for human merge', instructions: [],
-      changeSummary: { filesChanged: 1, additions: 1, deletions: 0,
-        files: [{ path: 'result.ts', additions: 1, deletions: 0 }], truncated: false, totalsTruncated: false },
-    },
-  });
-  writeFileSync(join(repository, '.takt', 'goals', currentGoal.id, 'goal.json'), JSON.stringify(currentGoal));
-  const taskStatus = stateVariant === 'task-status' ? 'running' : 'pending';
-  doubles.taskItems.mockReturnValue([{
-    goalId: currentGoal.id, kind: taskStatus, status: taskStatus,
-    name: 'current-goal-task', createdAt: '2026-10-24T00:00:00.000Z',
-    filePath: join(repository, '.takt', 'tasks', 'current-goal-task.md'),
-  }]);
-  await submit(opened.attachmentId, { kind: 'message', text: 'continue' });
-  await finished();
-  const persisted = store.read(record.id, record.assignment)!;
-  expect(ids[0]).toBe(savedId);
-  if (outcome === 'resume') {
-    expect(attempts).toBe(2);
-    expect(ids[1]).toBeUndefined();
-    expect(prompts).toHaveLength(providerType === 'codex' ? 2 : 1);
-    expect(persisted.sessionId).toBe(providerType === 'codex' ? 'fresh-session' : freshTerminalId);
-    expect(outputs).toContainEqual(expect.objectContaining({ kind: 'result', result: { kind: 'reply', message: 'fresh reply' } }));
-  } else if (outcome === 'body') {
-    expect(attempts).toBe(1);
-    expect(persisted.sessionId).toBe(savedId);
-    expect(outputs).toContainEqual(expect.objectContaining({ kind: 'result', result: { kind: 'reply', message: 'session_continuation_unsupported' } }));
-  } else {
-    expect(attempts).toBe(outcome === 'second-failure' ? 2 : 1);
-    expect(persisted.sessionId).toBe(outcome === 'tool' || outcome === 'second-failure' ? null : savedId);
-    expect(outputs.some((output) => output.kind === 'result' && output.result.kind === 'error')).toBe(true);
-  }
-});
-
-it.each([1, 4])('reads each goal once per snapshot with %i inquiries and notices per goal', async (count) => {
-  const goals = [5, 6, 7].map((prefix) => ({ ...goalRecord(), id: `${prefix}50e8400-e29b-41d4-a716-446655440000`,
-    questions: Array.from({ length: count }, (_, index) => ({ ...createInquiry({ body: `Question ${prefix}/${index}` }),
-      createdAt: `2026-10-24T00:00:0${index}.000Z` })),
-    notifications: Array.from({ length: count }, (_, index) => ({ id: randomUUID(), kind: 'progress' as const,
-      body: `Notice ${prefix}/${index}\nComplete detail`, recordedAt: `2026-10-24T00:00:0${index}.000Z` })),
-    workLog: [{ id: randomUUID(), summary: `Work ${prefix}`, recordedAt: '2026-10-24T00:00:00.000Z' }],
-  }));
-  for (const goal of goals) await new GoalStore(repository).create(goal);
-  const reads = vi.spyOn(privateFiles, 'readPrivateFileState');
-  const config = vi.spyOn(managerConfig, 'resolveManagerConfig');
-  const opened = await open();
-  for (const read of [opened.read, await service.snapshot(opened.attachmentId)]) {
-    reads.mockClear();
-    config.mockClear();
-    const items: SnapshotItem[] = [];
-    for await (const item of read.items) items.push(item);
-    expect(config).toHaveBeenCalledExactlyOnceWith(repository);
-    expect(reads.mock.calls.map(([path]) => path).filter((path) => basename(path) === 'goal.json').sort())
-      .toEqual(goals.map((goal) => join(repository, '.takt', 'goals', goal.id, 'goal.json')).sort());
-    expect(items.flatMap((item) => item.kind === 'goal' ? [item.goal.id] : [])).toEqual(goals.map((goal) => goal.id));
-    expect(items.flatMap((item) => item.kind === 'inquiry' ? [item.inquiry.question.id] : []))
-      .toEqual(Array.from({ length: count }, (_, index) => goals.map((goal) => goal.questions[index]!.id)).flat());
-    expect(items.flatMap((item) => item.kind === 'notice' ? [item.notice.id] : []))
-      .toEqual(Array.from({ length: count }, (_, index) => goals.map((goal) => goal.notifications[count - index - 1]!.id)).flat());
-    expect(items.flatMap((item) => item.kind === 'display_event' ? [item.event.id] : []))
-      .toEqual(goals.flatMap((goal) => [JSON.stringify([goal.id, 'work-log', goal.workLog[0]!.id]),
-        ...goal.notifications.map((notification) => JSON.stringify([goal.id, 'notification', notification.id]))]));
-  }
+  call.mockResolvedValue({ ...success, content: '', structuredOutput: { message: 'verified', summary: null }, sessionId: 'recovered' });
+  const executor = createManagerTurnExecutor(repository, { ctx: {
+    provider: makeProvider({ setup: () => ({ call }) }), providerType: 'mock', model: undefined, lang: 'en',
+  }, strategy: { systemPrompt: 'manager' } });
+  resolveRuntime.mockResolvedValue({ provider: 'mock', model: null, language: 'en', contextKey: 'test', executor });
+  const port = await open();
+  await port.submit('/verify');
+  expect((await port.completed.promise).result).toMatchObject({ kind: 'reply' });
+  await fixture.settled();
+  expect(call.mock.calls[0]![1].sessionId).toBe(before.session.sessionId);
+  expect(call.mock.calls[2]![1].sessionId).toBe('recovered');
+  expect((await fixture.store.read(id))!.state.session.sessionId).toBe('recovered');
+  const next = await open();
+  await next.submit('continue');
+  expect((await next.completed.promise).result).toMatchObject({ kind: 'reply' });
+  await fixture.settled();
+  expect(call.mock.calls[3]![1].sessionId).toBe('recovered');
 });

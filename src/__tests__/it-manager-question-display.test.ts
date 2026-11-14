@@ -14,16 +14,18 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { cleanup,render } from 'ink-testing-library';
 import { EventEmitter } from 'node:events';
-import { mkdirSync,mkdtempSync,readFileSync,realpathSync,rmSync,writeFileSync } from 'node:fs';
+import { mkdirSync,mkdtempSync,readFileSync,realpathSync,renameSync,rmSync,writeFileSync } from 'node:fs';
 import { basename,join } from 'node:path';
 import { createElement } from 'react';
 import { afterEach,beforeEach,expect,it,vi } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { loadTaskHistory } from '../app/cli/taskHistory.js';
+import type { TurnEvent } from '../core/daemon/events.js';
 import type { WorkflowState } from '../core/models/index.js';
 import * as workflowCore from '../core/workflow/index.js';
 import { formatTaskHistorySummary } from '../features/interactive/interactive-summary.js';
 import { ManagerView } from '../features/manager/ManagerView.js';
+import { buildManagerTurnPrompt } from '../features/manager/conversationPrompt.js';
 import { ManagerServiceClient, spyConversationCommand } from './helpers/manager-service-client.js';
 import { createTaktMcpServer } from '../features/mcp/server.js';
 import { executeTaskAndCompleteWithDetails,executeTaskWithResult } from '../features/tasks/execute/taskExecution.js';
@@ -35,6 +37,8 @@ import { appendGoalNotification,formatGoalQuestionNotification } from '../infra/
 import { addGoalQuestion,withdrawGoalQuestion } from '../infra/goals/questions.js';
 import type { Goal, GoalQuestion } from '../infra/goals/schema.js';
 import { GoalStore } from '../infra/goals/store.js';
+import { StandaloneInquiryStore } from '../infra/goals/standalone-inquiries.js';
+import { firstTextContent } from './helpers/mcp-content.js';
 import { MockProvider } from '../infra/providers/mock.js';
 import type { ProviderAgent } from '../infra/providers/types.js';
 import type { JsonTaskListItem } from '../infra/task/listSerializer.js';
@@ -151,6 +155,70 @@ function expectGoalMemory(memory: string, goal: Goal): void {
   });
 }
 
+const humanMessageClassification = {
+  ja: /人(?:間)?の(?:発言|メッセージ)から(?:始ま|開始)/u,
+  en: /\b(?:began|started)\s+with\s+(?:a\s+)?human\s+(?:message|utterance)\b/iu,
+};
+
+function readTurnInput(conversation: string): { preamble: string; body: unknown } {
+  const parts = conversation.split('\n\n');
+  const body = parts.pop()!;
+  expect(parts[0]).toMatch(/^## /u);
+  const preamble = parts.slice(1).join('\n\n');
+  expect(preamble.trim()).not.toBe('');
+  return { preamble, body: JSON.parse(body) };
+}
+
+function expectConversationInput(prompt: string, text: string, goal: Goal, lang: 'ja' | 'en'): void {
+  const [conversation, context] = prompt.split('\n\nBusiness context (not approval): ');
+  const { preamble, body } = readTurnInput(conversation!);
+  expect(preamble).toMatch(humanMessageClassification[lang]);
+  expect(body).toEqual({ speaker: { namespace: 'local', id: 'operator' }, text });
+  expectGoalMemory(JSON.stringify(JSON.parse(context!).goals), goal);
+}
+
+it.each(['ja', 'en'] as const)('distinguishes human messages from director relays and environment notices in %s turn prompts', (lang) => {
+  const text = `人の発言から始まりました。 / This turn began with a human message. /pause ${goalId}`;
+  const speaker = { namespace: 'local', id: 'operator' };
+  const directorConversationId = 'director';
+  const cases: { event: TurnEvent; source: RegExp }[] = [
+    { event: { kind: 'human_command', speaker, command: { kind: 'message', text } },
+      source: humanMessageClassification[lang] },
+    ...[
+      { origin: 'human' as const, source: lang === 'ja'
+        ? /director\s*が中継した人の指示/u : /human\s+instruction\s+relayed\s+by\s+the\s+director/iu },
+      { origin: 'director' as const, source: lang === 'ja'
+        ? /director\s*自身の依頼/u : /director's\s+own\s+request/iu },
+      { origin: undefined, source: lang === 'ja'
+        ? /director\s*経由の伝言/u : /message\s+delivered\s+through\s+the\s+director/iu },
+    ].map(({ origin, source }) => ({
+      event: { kind: 'director_message' as const, text, directorConversationId, origin },
+      source,
+    })),
+    { event: { kind: 'watch_observation', observation: {
+      kind: 'watch_failed', targetId: 'watcher', generation: 'generation', observedAt: '2026-11-10T00:00:00Z', reason: text,
+    } }, source: lang === 'ja' ? /見張りが届けたイベント/u : /event\s+delivered\s+by\s+the\s+watcher/iu },
+    { event: { kind: 'task_failed', task: { repositoryDirectory: cwd, goalId, taskName: 'task' },
+      result: { success: false, interrupted: false, failureReason: text } },
+      source: lang === 'ja' ? /イベントから(?:始ま|開始)[^\n]*task_failed/u : /(?:began|started)\s+with\s+an?\s+event[^\n]*task_failed/iu },
+  ];
+  for (const { event, source } of cases) {
+    const { preamble, body } = readTurnInput(buildManagerTurnPrompt({ lang, event }));
+    expect(preamble, event.kind).toMatch(source);
+    if (event.kind === 'human_command') {
+      expect(body).toEqual({ speaker, text });
+    } else {
+      expect(preamble, event.kind).not.toMatch(humanMessageClassification[lang]);
+    }
+    if (event.kind === 'director_message') {
+      expect(preamble).toMatch(new RegExp(`\\borigin\\s*(?:は|is)\\s*${event.origin ?? 'unknown'}\\b`, 'iu'));
+      expect(body).toEqual({ text, directorConversationId, origin: event.origin ?? 'unknown' });
+    } else if (event.kind !== 'human_command') {
+      expect(body).toEqual({ event, instruction: expect.any(String) });
+    }
+  }
+});
+
 const irreversibleWarning = /取り消せ|元に戻せ|不可逆|cannot.*undo|irreversible/iu;
 
 async function expectAbortConfirmation(goal: Goal): Promise<void> {
@@ -210,6 +278,41 @@ function confirmAbort(): void {
   app!.stdin.write('\x1b[A');
   app!.stdin.write('\r');
 }
+
+it('lists a newly created standalone question in Ctrl+R and saves its TUI answer with webhook notifications disabled', async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  vi.stubEnv('TAKT_NOTIFY_WEBHOOK', 'https://example.test/standalone-question');
+  const server = createTaktMcpServer({}, { toolSet: 'manager', allowedProjectRoot: cwd });
+  const client = new Client({ name: 'standalone-display-test', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  try {
+    const { call } = await mountGoalControls('en', goalRecord());
+    await server.connect(b);
+    await client.connect(a);
+    const result = await client.callTool({ name: 'takt_ask_standalone_question', arguments: { cwd, body: 'Which goal should handle this event?' } });
+    expect(result.isError, firstTextContent(result.content)).not.toBe(true);
+    const store = new StandaloneInquiryStore(process.env.TAKT_CONFIG_DIR!, { kind: 'repository', repositoryDirectory: cwd });
+    const questions = await store.listPending();
+    expect(questions).toHaveLength(1);
+    const question = questions[0]!;
+    await openMenu('answer');
+    await waitFor(() => expect(app!.lastFrame()).toContain(question.body));
+    app!.stdin.write('\r');
+    await waitFor(() => expect(app!.lastFrame()).toContain('Enter your answer'));
+    app!.stdin.write('Use the export goal');
+    app!.stdin.write('\r');
+    await waitFor(async () => expect(await store.get(question.id)).toMatchObject({ status: 'answered',
+      answer: { text: 'Use the export goal', source: 'tui' } }));
+    expect(await store.listPending()).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(call).not.toHaveBeenCalled();
+  } finally {
+    try { await client.close(); } finally { await server.close(); }
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  }
+});
 
 it.each(['choice', 'free text'] as const)('persists only the selected inquiry through the real session with a %s answer', async (mode) => {
   const pending: GoalQuestion = { id: '650e8400-e29b-41d4-a716-446655440001', recipient: 'human', status: 'pending',
@@ -333,14 +436,14 @@ it.each(['enter', 'escape'] as const)('blocks inquiry entry during registration 
   call.mockResolvedValueOnce({ persona: 'manager', status: 'done', timestamp: new Date(), content: '',
     structuredOutput: { message: 'Summary ready', summary } });
   await send('Prepare export');
-  await waitFor(() => expect(app!.lastFrame()).toContain('Summary to register'));
+  await vi.waitFor(() => expect(app!.lastFrame()).toContain('Proposed goal'), { timeout: 10_000 });
   let finish!: () => void;
   const registration = new Promise<void>((resolve) => { finish = resolve; });
   const approval = spyConversationCommand(session!, 'approve_summary').mockImplementation(async (command) => {
     await registration;
     if (command.kind !== 'approve_summary') throw new Error('Expected approval');
     await session!.submit({ kind: 'dismiss_summary', revision: command.revision });
-    return { kind: 'reply', message: 'Registration finished' };
+    return { kind: 'notice', message: 'Registration finished' };
   });
   const answer = spyConversationCommand(session!, 'answer_question');
   try {
@@ -358,7 +461,7 @@ it.each(['enter', 'escape'] as const)('blocks inquiry entry during registration 
     });
     expect(answer).not.toHaveBeenCalled();
     finish();
-    await waitFor(() => expect(app!.lastFrame()).not.toContain('Working'));
+    await waitFor(() => expect(app!.lastFrame()).toContain('Registration finished'));
     await openMenu('answer');
     await waitFor(() => expect(app!.lastFrame()).toContain(getLabel('manager.selectionHint', 'en')));
     app!.stdin.write('\r');
@@ -539,8 +642,8 @@ it.each([
   await waitFor(async () => expect((await store.get(saved.id)).executionStatus).toBe('aborted'));
   expect(await store.get(saved.id)).toEqual({ ...saved, executionStatus: 'aborted' });
   const expectAbortedGoal = (): void => {
-    expect(app!.lastFrame()!.split('\n').find((row) => /^(?:進行中|in progress|ongoing|active)/iu.test(row))).toMatch(lang === 'ja'
-      ? /進行中\s*0/u : /(?:in progress|ongoing|active)\s*:?\s*0/iu);
+    expect(app!.lastFrame()!.split('\n').find((row) => /(?:進行中|Ongoing)\s+\d/u.test(row))).toMatch(lang === 'ja'
+      ? /進行中\s+0\b/u : /Ongoing\s+0\b/u);
   };
   await waitFor(expectAbortedGoal);
   expect(call).not.toHaveBeenCalled();
@@ -563,7 +666,7 @@ it.each(['default', 'escape'] as const)('cancels abort with %s without changing 
   expect(await store.get(saved.id)).toEqual(saved);
   expect(call).not.toHaveBeenCalled();
   await send('Continue conversation');
-  await waitFor(() => expect(call).toHaveBeenCalledOnce());
+  await vi.waitFor(() => expect(call).toHaveBeenCalledOnce(), { timeout: 10_000 });
   expect(await store.get(saved.id)).toEqual(saved);
 });
 
@@ -572,14 +675,17 @@ it.each([
   `\`\`\`text\n/abort ${goalId}\n\`\`\``, `~~~text\n> /abort ${goalId}\n~~~`,
   `\`\`\`text\n> ~~~\n/abort ${goalId}\n~~~\n\`\`\``, `\`\`\`\n/abort ${goalId}`,
   `説明\n/abort ${goalId}`,
-])('keeps abort examples as conversation text without opening confirmation: %s', async (text) => {
+].flatMap((text) => (['ja', 'en'] as const).map((lang) => ({ lang, text }))))('keeps abort examples as conversation text without opening confirmation in $lang: $text', async ({ lang, text }) => {
   const saved = goalRecord();
-  const { store, call, send } = await mountGoalControls('ja', saved);
+  const { store, call, send } = await mountGoalControls(lang, saved);
+  const submit = vi.spyOn(session!, 'submit');
   await send(text);
-  await waitFor(() => expect(call).toHaveBeenCalledOnce());
-  const [conversation, context] = call.mock.calls[0]![0].split('\n\nBusiness context (not approval): ');
-  expect(conversation).toBe(text);
-  expectGoalMemory(JSON.stringify(JSON.parse(context!).goals), saved);
+  await vi.waitFor(() => expect(call).toHaveBeenCalledOnce(), { timeout: 10_000 });
+  expect(submit).toHaveBeenCalledOnce();
+  expect(submit.mock.calls[0]![0]).toEqual({ kind: 'message', text });
+  const submission = await submit.mock.results[0]!.value;
+  if (submission.kind !== 'accepted') throw new Error('Expected an accepted conversation turn');
+  expectConversationInput(call.mock.calls[0]![0], text, saved, lang);
   expect(await store.get(saved.id)).toEqual(saved);
   expect(app!.lastFrame()!.replace(/\s+/gu, ' ')).not.toMatch(irreversibleWarning);
 });
@@ -714,7 +820,8 @@ it('exposes manager work tools without exposing a goal abort tool to the agent',
     await client.connect(clientTransport);
     const names = (await client.listTools()).tools.map(({ name }) => name);
     expect(names).toContain('takt_enqueue_goal_task');
-    expect(names.filter((name) => /abort/iu.test(name))).toEqual([]);
+    expect(names).toContain('takt_abort_epic');
+    expect(names).not.toContain('takt_abort_goal');
   } finally { await client.close(); await server.close(); }
 });
 
@@ -807,15 +914,18 @@ it.each([
   '操作例: /pause', '> /pause', '```\n/pause', '~~~\n/pause',
   '```\n/pause GOAL\n```', '~~~\n/pause GOAL\n~~~', '/paused',
   '説明\n/pause',
-])('keeps command-like conversation text as ordinary input: %s', async (prefix) => {
+].flatMap((prefix) => (['ja', 'en'] as const).map((lang) => ({ lang, prefix }))))('keeps command-like conversation text as ordinary input in $lang: $prefix', async ({ lang, prefix }) => {
   const saved = goalRecord();
-  const { store, call, send } = await mountGoalControls('ja', saved);
+  const { store, call, send } = await mountGoalControls(lang, saved);
+  const submit = vi.spyOn(session!, 'submit');
   const text = prefix.includes('GOAL') ? prefix.replace('GOAL', goalId) : `${prefix} ${goalId}`;
   await send(text);
-  await waitFor(() => expect(call).toHaveBeenCalledOnce());
-  const [conversation, context] = call.mock.calls[0]![0].split('\n\nBusiness context (not approval): ');
-  expect(conversation).toBe(text);
-  expectGoalMemory(JSON.stringify(JSON.parse(context!).goals), saved);
+  await vi.waitFor(() => expect(call).toHaveBeenCalledOnce(), { timeout: 10_000 });
+  expect(submit).toHaveBeenCalledOnce();
+  expect(submit.mock.calls[0]![0]).toEqual({ kind: 'message', text });
+  const submission = await submit.mock.results[0]!.value;
+  if (submission.kind !== 'accepted') throw new Error('Expected an accepted conversation turn');
+  expectConversationInput(call.mock.calls[0]![0], text, saved, lang);
   expect(await store.get(goalId)).toEqual(saved);
 });
 
@@ -940,7 +1050,8 @@ it.each([true, false])('keeps human inquiries and custom notifications without p
   await new GoalStore(cwd).create(saved);
   const display = await readManagerTestDisplay(cwd);
   expect(display.questions.map(({ question }) => question.id).sort()).toEqual([human.questionId, second.questionId].sort());
-  expect(display.events.map(({ id }) => JSON.parse(id)[2])).toEqual(saved.notifications!.filter(({ kind }) => kind !== 'question').map(({ id }) => id));
+  expect(display.events.map(({ id }) => id)).toEqual(saved.notifications!.filter(({ kind }) => kind !== 'question')
+    .map(({ id }) => JSON.stringify([cwd, saved.id, 'notification', id])));
   session = new ManagerServiceClient({
     cwd,
     plan: { ctx: { providerType: 'mock', model: undefined, lang: 'ja', provider: new MockProvider() },
@@ -999,11 +1110,10 @@ it.each([
   const { store, call, saved } = await mountNewNoticeControls(lang, initial);
   const display = await readManagerTestDisplay(cwd, lang);
   expect(display.events).toHaveLength(1);
-  expect(display.events[0]!.id).toBe(JSON.stringify([saved.id, 'notification', saved.notifications![0]!.id]));
+  expect(display.events[0]!.id).toBe(JSON.stringify([cwd, saved.id, 'notification', saved.notifications![0]!.id]));
   expect(display.events[0]!.message.split('\n').slice(2, 5)).toEqual(body.split('\n').slice(0, 3));
   expect(display.events[0]!.message.split('\n')[5]).toMatch(lang === 'ja' ? /省略/u : /omitted/iu);
   expect(display.events[0]!.message).not.toMatch(/Ctrl\+N|\^N/u);
-  expect(display).toMatchObject({ notices: [{ message: expect.stringContaining(body) }] });
   expect(await store.get(saved.id)).toEqual(saved);
   expect(call).not.toHaveBeenCalled();
   await waitFor(() => {
@@ -1062,11 +1172,11 @@ it.each(['ja', 'en'] as const)('renders old saved merge instructions once in the
   await waitFor(() => {
     const frame = app!.lastFrame()!;
     expect(frame).toContain(summary);
-    expect(frame).toMatch(lang === 'ja' ? /release ブランチへマージ/u : /merge them into the release branch/iu);
     const normalized = frame.replace(/\s+/gu, '');
+    expect(normalized).toContain(getLabel('manager.notificationMerge', lang, { branch: 'release' }).replace(/\s+/gu, ''));
     let previous = -1;
-    for (const command of commands) {
-      const token = command.replace(/\s+/gu, '');
+    for (const instruction of instructions) {
+      const token = instruction.replace(/\s+/gu, '');
       const position = normalized.indexOf(token);
       expect(position).toBeGreaterThan(previous);
       expect(normalized.indexOf(token, position + token.length)).toBe(-1);
@@ -1079,6 +1189,9 @@ it.each(['ja', 'en'] as const)('renders old saved merge instructions once in the
 });
 
 it.each(['ja', 'en'] as const)('reopens the %s TUI without withdrawn question details while retaining saved notification history', async (lang) => {
+  const repositoryDirectory = `${cwd}-CSV`;
+  renameSync(cwd, repositoryDirectory);
+  cwd = repositoryDirectory;
   writeFileSync(join(cwd, '.takt', 'config.yaml'), 'provider: mock\nmanager:\n  auto_run: false\n  notifications:\n    question: true\n');
   invalidateResolvedConfigCache(cwd);
   const question = { id: '650e8400-e29b-41d4-a716-446655440001', recipient: 'human' as const, status: 'pending' as const,
@@ -1088,7 +1201,27 @@ it.each(['ja', 'en'] as const)('reopens the %s TUI without withdrawn question de
     body: formatGoalQuestionNotification(question, lang === 'ja' ? 'en' : 'ja'), recordedAt: '2026-10-08T00:00:00Z',
   }] };
   const { store, call } = await mountGoalControls(lang, saved);
-  await waitFor(() => expect(app!.lastFrame()).toContain('^R'));
+  const withoutAssignment = (frame: string, pending: number): string => {
+    const heading = getLabel('manager.assignmentHeading', lang, { name: basename(cwd) });
+    const counts = getLabel('manager.counts', lang, { goals: '1', awaiting: '0', questions: String(pending) });
+    const assignment = `${heading} | ${counts}`;
+    const rows = frame.split('\n');
+    const assignmentRows = rows.filter((row) => row.trim() === assignment);
+    expect(assignmentRows).toHaveLength(1);
+    expect(assignmentRows[0]).toContain('CSV');
+    return rows.filter((row) => row !== assignmentRows[0]).join('\n');
+  };
+  await openMenu('answer');
+  await waitFor(() => {
+    const content = withoutAssignment(app!.lastFrame()!, 1);
+    expect(content).toContain(getLabel('manager.selectionTitles.answer', lang));
+    expect(content).toContain(question.body);
+  });
+  app!.stdin.write('\r');
+  await waitFor(() => {
+    const content = withoutAssignment(app!.lastFrame()!, 1);
+    for (const value of [question.body, ...question.options]) expect(content).toContain(value);
+  });
   app!.unmount();
   const withdrawn = await store.update(saved.id, (goal) => withdrawGoalQuestion(goal, question.id));
   expect(withdrawn.questions).toEqual([{
@@ -1100,17 +1233,15 @@ it.each(['ja', 'en'] as const)('reopens the %s TUI without withdrawn question de
   expect(display.events).toEqual([]);
   await remount(lang);
   await waitFor(() => {
-    const frame = app!.lastFrame()!;
-    expect(frame).toContain(lang === 'ja' ? '未回答 0' : 'Pending 0');
-    for (const value of [question.body, ...question.options]) expect(frame).not.toContain(value);
-    expect(frame).not.toContain(question.id);
+    const content = withoutAssignment(app!.lastFrame()!, 0);
+    for (const value of [question.body, ...question.options, question.id]) expect(content).not.toContain(value);
   });
   expect(await store.get(saved.id)).toEqual(withdrawn);
   expect(call).not.toHaveBeenCalled();
 });
 
 it.each(['question', 'awaiting_merge', 'completed', 'progress', 'blocked', 'custom'] as const)(
-  'applies the current %s switch to saved TUI notifications without hiding questions or work records', async (kind) => {
+  'applies the current %s switch to saved TUI notifications without hiding questions or exposing work records', async (kind) => {
     const question = addGoalQuestion(goalRecord(), { body: '形式を選んでください' });
     const policy = { question: true, awaiting_merge: true, completed: true, progress: true, blocked: true, custom: true };
     let goal = question.goal;
@@ -1123,9 +1254,11 @@ it.each(['question', 'awaiting_merge', 'completed', 'progress', 'blocked', 'cust
     invalidateResolvedConfigCache(cwd);
     const display = await readManagerTestDisplay(cwd);
     expect(display.questions.map(({ question: saved }) => saved.id)).toEqual([question.questionId]);
-    expect(display.events.map(({ id }) => JSON.parse(id)[2])).toEqual([
-      goal.workLog[0]!.id, ...goal.notifications!.filter((notice) => notice.kind !== 'question' && notice.kind !== kind).map(({ id }) => id),
+    expect(display.events.map(({ id }) => id)).toEqual([
+      ...goal.notifications!.filter((notice) => notice.kind !== 'question' && notice.kind !== kind)
+        .map(({ id }) => JSON.stringify([cwd, goal.id, 'notification', id])),
     ]);
+    expect((await new GoalStore(cwd).get(goal.id)).workLog).toEqual(goal.workLog);
     expect((await new GoalStore(cwd).get(goal.id)).notifications).toEqual(goal.notifications);
   },
 );

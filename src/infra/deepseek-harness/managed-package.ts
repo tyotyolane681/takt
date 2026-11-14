@@ -26,6 +26,7 @@ import {
   DEEPSEEK_HARNESS_RUNTIME_VERSION,
   DEEPSEEK_HARNESS_SDK_VERSION,
 } from './constants.js';
+import type { ManagedDeepSeekLlm, ManagedDeepSeekSdk } from './sdk-types.js';
 
 const MANAGED_DIRECTORY = 'deepseek-harness';
 const CURRENT_LINK = 'sdk';
@@ -96,9 +97,15 @@ async function readAssets(paths: { manifestPath: string; lockPath: string }, ins
   };
   if (manifest.name !== 'takt-deepseek-harness-runtime'
     || manifest.overrides?.fflate !== '0.8.3'
+    || (!installed && manifest.dependencies?.['@deepseek-ai/cordis'] !== '4.0.5')
+    || (!installed && manifest.dependencies?.['@deepseek-ai/cordis-plugin-group'] !== '1.0.5')
     || (!installed && manifest.dependencies?.['@deepseek-ai/dsh-sdk-client'] !== DEEPSEEK_HARNESS_SDK_VERSION)
     || (!installed && manifest.dependencies?.['@deepseek-ai/dsh-llm'] !== DEEPSEEK_HARNESS_SDK_VERSION)
     || (!installed && manifest.dependencies?.['@deepseek-ai/dsh'] !== DEEPSEEK_HARNESS_RUNTIME_VERSION)
+    || (!installed && Object.entries(manifest.dependencies ?? {}).some(([name, version]) => (
+      (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+      && version !== DEEPSEEK_HARNESS_SDK_VERSION
+    )))
     || lock.packages?.['']?.dependencies?.['@deepseek-ai/dsh'] !== manifest.dependencies?.['@deepseek-ai/dsh']
     || lock.packages?.['node_modules/fflate']?.version !== '0.8.3') {
     throw new Error('DeepSeek Harness managed npm assets are inconsistent; reinstall TAKT.');
@@ -309,8 +316,8 @@ export async function getReadyDeepSeekHarnessPackageDirectory(): Promise<string>
 export interface ManagedDeepSeekHarnessModules {
   directory: string;
   stale?: boolean;
-  sdk: typeof import('@deepseek-ai/dsh-sdk-client');
-  llm: typeof import('@deepseek-ai/dsh-llm');
+  sdk: ManagedDeepSeekSdk;
+  llm: ManagedDeepSeekLlm;
 }
 
 async function isStaleInstallation(directory: string): Promise<boolean> {

@@ -102,7 +102,7 @@ describe('Caccia effect through PR workflow execution', () => {
     const eventSink = vi.fn();
     expect(await executePrWorkflow({ projectCwd: project, prNumber: 123, workflow: workflowFile,
       settings: resolveMergeSettings(undefined), display: { outputMode: 'silent', eventSink } }))
-      .toEqual({ merged: true });
+      .toMatchObject({ success: true, merged: true, outcome: 'merged' });
     expect(eventSink).toHaveBeenCalledExactlyOnceWith({ type: 'progress', level: 'warn', message: 'Caccia child trace failed' });
     expect(await mocks.execution.mock.calls[0]?.[0]).toMatchObject({ success: true });
   });
@@ -156,7 +156,7 @@ describe('Caccia effect through PR workflow execution', () => {
           ] },
         { name: 'report', kind: 'system', effects: [{ type: 'comment_pr', pr: 123,
           body: 'outcome={effect:external_review.caccia.outcome}; head={effect:external_review.caccia.headSha}; unresolved={effect:external_review.caccia.unresolvedCount}' }],
-          rules: [{ condition: 'when(effect.report.comment_pr.success == true)', next: outcome === 'limit' ? 'COMPLETE' : 'ci' },
+          rules: [{ condition: 'when(effect.report.comment_pr.success == true)', next: outcome === 'limit' ? 'ABORT' : 'ci' },
             { condition: 'when(true)', next: 'ABORT' }] },
         { name: 'ci', kind: 'system',
           system_inputs: [{ type: 'pr_status', source: 'current_pr', as: 'pr' }],
@@ -168,7 +168,7 @@ describe('Caccia effect through PR workflow execution', () => {
           rules: [{ condition: 'when(effect.merge.merge_pr.success == true)', next: 'COMPLETE' },
             { condition: 'when(true)', next: 'merge_failed' }] },
         { name: 'merge_failed', kind: 'system', effects: [{ type: 'comment_pr', pr: 123, body: 'Merge failed' }],
-          rules: [{ condition: 'when(effect.merge_failed.comment_pr.success == true)', next: 'COMPLETE' },
+          rules: [{ condition: 'when(effect.merge_failed.comment_pr.success == true)', next: 'ABORT' },
             { condition: 'when(true)', next: 'ABORT' }] },
         { name: 'error', kind: 'system', effects: [{ type: 'comment_pr', pr: 123,
           body: '{effect:external_review.caccia.error}' }],
@@ -216,7 +216,8 @@ describe('Caccia effect through PR workflow execution', () => {
     unresolvedCount = 0;
     mkdirSync(join(project, '.takt'), { recursive: true });
     configure({ enabled: true, wait_timeout_ms: 17, max_iterations: 2, workflow: 'custom-caccia' });
-    const details = () => ({ number: 123, headBranch: 'feature/pr', baseBranch: 'main',
+    const details = () => ({ number: 123, title: 'Preserve the PR purpose', body: 'Fix the changed code only.',
+      headBranch: 'feature/pr', baseBranch: 'main',
       headSha: git(root, '--git-dir', remote, 'rev-parse', 'refs/heads/feature/pr'),
       headRepositoryUrl: remote, headRepositoryPushUrls: [remote], sameRepository });
     mocks.details.mockImplementation(async () => details());
@@ -300,7 +301,8 @@ describe('Caccia effect through PR workflow execution', () => {
       return result;
     }, { provider: 'mock' }, { outputMode: 'silent' });
     expect(result.success, JSON.stringify(result)).toBe(expectedSuccess);
-    return { merged };
+    return { success: result.success, merged, failureReason: result.failureReason,
+      outcome: merged ? 'merged' : result.success ? 'prepared' : 'unresolved' };
   }
 
   async function useRealCaccia(pushUrls: string[]) {
@@ -334,7 +336,8 @@ describe('Caccia effect through PR workflow execution', () => {
       }
       return { persona: 'coder', status: 'done', timestamp: new Date(),
         content: options?.cwd === activeClone ? 'Fixed'
-          : JSON.stringify([{ thread_id: 'finding', valid: true, reason: 'Fixed the changed code' }]) };
+          : JSON.stringify({ outcome: 'complete', reason: '',
+            decisions: [{ thread_id: 'finding', valid: true, reason: 'Fixed the changed code' }] }) };
     });
     mocks.caccia.mockImplementation(async (input) => {
       pushedHead = git(activeClone, 'rev-parse', 'HEAD');
@@ -362,7 +365,7 @@ describe('Caccia effect through PR workflow execution', () => {
       const pushUrls = firstFails ? [mirror, remote] : [remote, mirror];
       await useRealCaccia(pushUrls);
       const record = vi.spyOn(TaskRunner.prototype, entry === 'merge' ? 'recordPrMergePushedHead' : 'recordCacciaPushedHead');
-      expect(await run(entry, false)).toEqual({ merged: false });
+      expect(await run(entry, false)).toMatchObject({ success: false, merged: false, outcome: 'unresolved' });
       const runner = new TaskRunner(project);
       const failed = runner.listFailedTasks()[0]!;
       const clone = activeClone;
@@ -396,12 +399,12 @@ describe('Caccia effect through PR workflow execution', () => {
         git(author, 'commit', '-m', 'External change');
         git(author, 'push', 'origin', 'HEAD:refs/heads/feature/pr');
       }
+      const retryHead = git(root, '--git-dir', remote, 'rev-parse', 'refs/heads/feature/pr');
       mocks.caccia.mockClear(); mocks.status.mockClear(); mocks.execution.mockClear();
       vi.mocked(runAgent).mockClear();
       if (entry === 'merge') {
         const retry = executePersistedPrMergeTask(claimed, runner, project, undefined, { outputMode: 'silent' });
-        if (externalChange) await expect(retry).rejects.toThrow();
-        else expect(await retry).toEqual({ merged: true });
+        expect(await retry).toMatchObject({ success: true, merged: true, outcome: 'merged' });
       } else {
         const retry = await executeTaskAndCompleteWithDetails(claimed, runner, project, async (request) => {
           expect(request.cwd).toBe(clone);
@@ -410,17 +413,16 @@ describe('Caccia effect through PR workflow execution', () => {
         }, { provider: 'mock' }, { outputMode: 'silent' });
         expect(retry.success).toBe(!externalChange);
       }
-      if (externalChange) {
+      if (externalChange && entry !== 'merge') {
         expect(git(clone, 'rev-parse', 'HEAD')).toBe(pushedHead);
-        if (entry === 'merge') expect(mocks.execution).not.toHaveBeenCalled();
         expect(runAgent).not.toHaveBeenCalled();
         expect(mocks.caccia).not.toHaveBeenCalled();
         expect(mocks.status).not.toHaveBeenCalled();
         expect(mocks.merge).not.toHaveBeenCalled();
       } else {
-        expect(mocks.caccia).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ expectedInitialHeadSha: savedHead }));
+        expect(mocks.caccia).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ expectedInitialHeadSha: retryHead }));
         expect(mocks.status).toHaveBeenCalled();
-        expect(mocks.merge).toHaveBeenCalledWith(123, project, entry === 'merge' ? 'squash' : undefined, savedHead);
+        expect(mocks.merge).toHaveBeenCalledWith(123, project, entry === 'merge' ? 'squash' : undefined, retryHead);
       }
     },
   );
@@ -432,7 +434,7 @@ describe('Caccia effect through PR workflow execution', () => {
     const record = vi.spyOn(TaskRunner.prototype, 'recordPrMergePushedHead');
     const result = await run('merge');
     const executions = await Promise.all(mocks.execution.mock.calls.map(([execution]) => execution));
-    expect(result, JSON.stringify({ executions, comments: mocks.comment.mock.calls })).toEqual({ merged: true });
+    expect(result, JSON.stringify({ executions, comments: mocks.comment.mock.calls })).toMatchObject({ success: true, merged: true, outcome: 'merged' });
     expect(record).toHaveBeenCalledExactlyOnceWith(expect.any(String), effectHead, pushedHead, 'caccia');
     expect(git(root, '--git-dir', mirror, 'rev-parse', 'refs/heads/feature/pr')).toBe(effectHead);
     expect(mocks.resolveThread).toHaveBeenCalledOnce();
@@ -449,7 +451,7 @@ describe('Caccia effect through PR workflow execution', () => {
       await worker(input);
       throw new Error('Review failed after push');
     });
-    expect(await run(entry, false)).toEqual({ merged: false });
+    expect(await run(entry, false)).toMatchObject({ success: false, merged: false, outcome: 'unresolved' });
     const runner = new TaskRunner(project);
     const firstFailed = runner.listFailedTasks()[0]!;
     const clone = activeClone;
@@ -543,39 +545,38 @@ describe('Caccia effect through PR workflow execution', () => {
     vi.mocked(runAgent).mockClear();
     effectOutcome = 'success'; unresolvedCount = 0; skipReason = null; effectReason = null;
     configure({ enabled: true, wait_timeout_ms: 17, max_iterations: 2, workflow: 'custom-caccia' });
+    const retryHead = git(root, '--git-dir', remote, 'rev-parse', 'refs/heads/feature/pr');
     mocks.caccia.mockImplementation(async (input) => {
       if (input.entry !== 'linked' || !input.expectedInitialHeadSha) throw new Error('Expected current PR head');
-      expect(input.expectedInitialHeadSha).toBe(savedHead);
-      return { outcome: 'success', headSha: savedHead, unresolvedCount: 0 };
+      expect(input.expectedInitialHeadSha).toBe(retryHead);
+      return { outcome: 'success', headSha: retryHead, unresolvedCount: 0 };
     });
     writeWorkflow();
     mocks.comment.mockReturnValue({ success: true });
     mocks.merge.mockImplementation((_pr, _cwd, _method, expectedSha) => {
-      expect(expectedSha).toBe(savedHead);
-      expect(git(clone, 'rev-parse', 'HEAD')).toBe(savedHead);
+      expect(expectedSha).toBe(retryHead);
+      expect(git(clone, 'rev-parse', 'HEAD')).toBe(retryHead);
       merged = true;
       return { success: true };
     });
-    if (externalChange && entry === 'merge') await expect(retry(thirdTask, thirdRunner)).rejects.toThrow();
-    else expect(await retry(thirdTask, thirdRunner)).toBe(!externalChange);
-    if (externalChange) {
+    expect(await retry(thirdTask, thirdRunner)).toBe(entry === 'merge' || !externalChange);
+    if (externalChange && entry !== 'merge') {
       expect(git(clone, 'rev-parse', 'HEAD')).toBe(savedHead);
-      if (entry === 'merge') expect(mocks.execution).not.toHaveBeenCalled();
       expect(runAgent).not.toHaveBeenCalled();
       expect(mocks.caccia).not.toHaveBeenCalled();
       expect(mocks.status).not.toHaveBeenCalled();
       expect(mocks.merge).not.toHaveBeenCalled();
     } else {
-      expect(mocks.caccia).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ expectedInitialHeadSha: savedHead }));
+      expect(mocks.caccia).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ expectedInitialHeadSha: retryHead }));
       expect(mocks.status).toHaveBeenCalled();
-      expect(mocks.merge).toHaveBeenCalledExactlyOnceWith(123, project, entry === 'merge' ? 'squash' : undefined, savedHead);
+      expect(mocks.merge).toHaveBeenCalledExactlyOnceWith(123, project, entry === 'merge' ? 'squash' : undefined, retryHead);
     }
   });
 
   it.each(['merge', 'from_pr', 'from_pr_local_origin', 'from_pr_custom_base'] as const)('%sは同じcloneをCaccia後のheadへ同期しCIとmergeへ渡す', async (entry) => {
     const result = await run(entry);
     const execution = await mocks.execution.mock.calls.at(-1)?.[0];
-    expect(result, JSON.stringify(execution)).toEqual({ merged: true });
+    expect(result, JSON.stringify(execution)).toMatchObject({ success: true, merged: true, outcome: 'merged' });
     expect(mocks.caccia).toHaveBeenCalledOnce();
     expect(mocks.merge).toHaveBeenCalledExactlyOnceWith(123, project, entry === 'merge' ? 'squash' : undefined, effectHead);
     expect(mocks.comment).toHaveBeenCalledWith(123,
@@ -784,7 +785,7 @@ describe('Caccia effect through PR workflow execution', () => {
 
   it('修正push後のrate limitも最新headのskippedとして後続へ渡す', async () => {
     effectOutcome = 'skipped'; skipReason = 'review_rate_limited'; effectReason = 'Review rate limited';
-    expect(await run('merge')).toEqual({ merged: true });
+    expect(await run('merge')).toMatchObject({ success: true, merged: true, outcome: 'merged' });
     expect(mocks.caccia).toHaveBeenCalledOnce();
     expect(mocks.comment).toHaveBeenCalledWith(123,
       `outcome=skipped; head=${effectHead}; unresolved=0`, project);
@@ -793,7 +794,7 @@ describe('Caccia effect through PR workflow execution', () => {
 
   it('limitを実行エラーへ変換せず件数と同期後headを返す', async () => {
     effectOutcome = 'limit'; unresolvedCount = 3;
-    expect(await run('merge')).toEqual({ merged: false });
+    expect(await run('merge')).toMatchObject({ success: false, merged: false, outcome: 'unresolved' });
     expect(mocks.caccia).toHaveBeenCalledOnce();
     expect(git(activeClone, 'rev-parse', 'HEAD')).toBe(effectHead);
     expect(mocks.comment).toHaveBeenCalledWith(123,
@@ -818,10 +819,146 @@ describe('Caccia effect through PR workflow execution', () => {
       `outcome=skipped; head=${effectHead}; unresolved=0`, project);
   });
 
+  it.each(['merge', 'from_pr'] as const)(
+    '%sで実レポートの中止理由と未判断IDをコメントと保存済みfailureReasonへそのまま渡す', async (entry) => {
+      await useRealCaccia([remote]);
+      const reason = 'Three findings were fixed; two remaining changes require a design decision.';
+      const report = { outcome: 'abort', reason, decisions: Array.from({ length: 3 }, (_, index) => ({
+        thread_id: `T${index + 1}`, valid: true, reason: 'Fixed the changed code.',
+      })) };
+      mocks.threads.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({
+        id: `T${index + 1}`, author: 'coderabbitai', body: 'Fix the changed code.', replies: [],
+      })));
+      const agent = vi.mocked(runAgent).getMockImplementation()!;
+      vi.mocked(runAgent).mockImplementation(async (...args) => {
+        const response = await agent(...args);
+        if (args[2]?.cwd === activeClone) return response;
+        return { ...response, content: args[2]?.permissionMode === 'readonly'
+          ? JSON.stringify(report) : 'ABORT: Three of five findings fixed; the remainder require a design decision.' };
+      });
+      let failureMessage: string | undefined;
+      const caccia = mocks.caccia.getMockImplementation()!;
+      mocks.caccia.mockImplementation(async (input) => {
+        try {
+          return await caccia(input);
+        } catch (error) {
+          if (error instanceof Error) failureMessage = error.message;
+          throw error;
+        }
+      });
+
+      const result = await run(entry, false);
+      expect(result).toMatchObject({ success: false, merged: false });
+
+      expect(failureMessage).toEqual(expect.stringContaining(reason));
+      expect(failureMessage).toEqual(expect.stringContaining('T4'));
+      expect(failureMessage).toEqual(expect.stringContaining('T5'));
+      expect(mocks.comment).toHaveBeenCalledExactlyOnceWith(123, failureMessage, project);
+      const saved = new TaskRunner(project).listTaskStateItems().find((task) => task.kind === 'failed');
+      if (entry === 'merge') expect(saved?.completion?.failureReason).toBe(failureMessage);
+      else {
+        expect(result).toMatchObject({ failureReason: failureMessage });
+        expect(saved?.failure?.error).toBe(failureMessage);
+      }
+      expect((await mocks.execution.mock.calls[0]![0]).reason).toBe(failureMessage);
+      expect(mocks.resolveThread).not.toHaveBeenCalled();
+      expect(mocks.merge).not.toHaveBeenCalled();
+      expect(effectHead).toBe(pushedHead);
+    },
+  );
+
+  it('同じworkflow内でCacciaを再実行して成功したら前の失敗理由を残さない', async () => {
+    const failure = 'Earlier Caccia design decision required; missing T4';
+    mocks.caccia.mockRejectedValueOnce(new Error(failure)).mockResolvedValue({
+      outcome: 'success', headSha: initialHead, unresolvedCount: 0,
+    });
+    writeFileSync(workflowFile, stringify({ name: 'retry-caccia', initial_step: 'first',
+      steps: [
+        { name: 'first', kind: 'system', effects: [{ type: 'caccia', pr: 123 }],
+          rules: [{ condition: 'when(effect.first.caccia.failed == true)', next: 'retry' }] },
+        { name: 'retry', kind: 'system', effects: [{ type: 'caccia', pr: 123 }],
+          rules: [{ condition: 'when(effect.retry.caccia.success == true)', next: 'ABORT' }] },
+      ] }));
+    const result = await runWorkflowExecution({ cwd: author, projectCwd: project, task: 'Retry Caccia',
+      workflowIdentifier: workflowFile, cacciaExecutionSource: 'from_pr',
+      prExecutionContext: { prNumber: 123, headBranch: 'feature/pr', baseBranch: 'main',
+        headSha: initialHead, headRepositoryUrl: remote, headRepositoryPushUrls: [remote] },
+      outputMode: 'silent', runPathsDirectory: join(project, '.takt', 'runs') });
+    expect(mocks.caccia).toHaveBeenCalledTimes(2);
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe('Workflow aborted by step transition');
+  });
+
+  it('Cacciaの失敗から復旧した後の別工程のABORTには元の失敗理由を渡さない', async () => {
+    const failure = 'Earlier Caccia design decision required; missing T4';
+    mocks.caccia.mockRejectedValueOnce(new Error(failure));
+    writeFileSync(workflowFile, stringify({ name: 'recover-caccia', initial_step: 'review', steps: [
+      { name: 'review', kind: 'system', effects: [{ type: 'caccia', pr: 123 }],
+        rules: [{ condition: 'when(effect.review.caccia.failed == true)', next: 'recovered' }] },
+      { name: 'recovered', kind: 'system', effects: [{ type: 'comment_pr', pr: 123, body: 'Recovered' }],
+        rules: [{ condition: 'when(true)', next: 'later' }] },
+      { name: 'later', kind: 'system', rules: [{ condition: 'when(true)', next: 'ABORT' }] },
+    ] }));
+    const result = await runWorkflowExecution({ cwd: author, projectCwd: project, task: 'Recover Caccia',
+      workflowIdentifier: workflowFile, cacciaExecutionSource: 'from_pr',
+      prExecutionContext: { prNumber: 123, headBranch: 'feature/pr', baseBranch: 'main',
+        headSha: initialHead, headRepositoryUrl: remote, headRepositoryPushUrls: [remote] },
+      outputMode: 'silent', runPathsDirectory: join(project, '.takt', 'runs') });
+    expect(mocks.caccia).toHaveBeenCalledOnce();
+    expect(mocks.comment).toHaveBeenCalledExactlyOnceWith(123, 'Recovered', project);
+    expect(result).toMatchObject({ success: false, reason: 'Workflow aborted by step transition', lastStep: 'later' });
+    const meta = JSON.parse(readFileSync(join(result.runDirectory!, 'meta.json'), 'utf8'));
+    expect(meta.reason).toBe('Workflow aborted by step transition');
+    expect(meta.failure).toMatchObject({ step: 'later', error: 'Workflow aborted by step transition' });
+  });
+
+  it.each((['merge', 'from_pr'] as const).flatMap((entry) =>
+    [true, false].map((ready) => ({ entry, ready })),
+  ))('$entryで失敗コメントの待機条件が$readyの場合にABORTの理由を返却・保存する', async ({ entry, ready }) => {
+    const failure = 'Earlier Caccia design decision required; missing T4';
+    const expectedReason = ready ? failure : 'Workflow aborted by step transition';
+    mocks.caccia.mockRejectedValue(new Error(failure));
+    writeFileSync(workflowFile, stringify({ name: 'wait-caccia-error', initial_step: 'review', steps: [
+      { name: 'review', kind: 'system', effects: [{ type: 'caccia', pr: 123 }],
+        rules: [{ condition: 'when(effect.review.caccia.failed == true)', next: 'report' }] },
+      { name: 'report', kind: 'system',
+        wait: { until: `when(${ready})`, interval_ms: 1, max_retries: 0, on_timeout: 'ABORT' },
+        effects: [{ type: 'comment_pr', pr: 123, body: '{effect:review.caccia.error}' }],
+        rules: [{ condition: 'when(true)', next: 'ABORT' }] },
+    ] }));
+    const runner = new TaskRunner(project);
+    if (entry === 'merge') {
+      const result = await executePrWorkflow({ projectCwd: project, prNumber: 123, workflow: workflowFile,
+        settings: resolveMergeSettings(undefined), display: { outputMode: 'silent' } });
+      expect(result).toMatchObject({ success: false, merged: false, outcome: 'unresolved' });
+    } else {
+      const services = createDefaultSystemStepServices({ cwd: project, projectCwd: project, task: 'enqueue PR' });
+      const effect = { type: 'enqueue_task', mode: 'from_pr', pr: 123, workflow: workflowFile, task: 'Review PR' } as const;
+      expect(await services.executeEffect(effect, effect, {} as WorkflowState)).toMatchObject({ success: true });
+      const task = runner.claimNextTasks(1)[0]!;
+      const result = await executeTaskAndCompleteWithDetails(task, runner, project,
+        (request) => runWorkflowExecution({ ...request, runPathsDirectory: join(project, '.takt', 'runs') }),
+        { provider: 'mock' }, { outputMode: 'silent' });
+      expect(result.success).toBe(false);
+      expect(result.failureReason).toBe(expectedReason);
+    }
+    expect(mocks.caccia).toHaveBeenCalledOnce();
+    if (ready) expect(mocks.comment).toHaveBeenCalledExactlyOnceWith(123, failure, project);
+    else expect(mocks.comment).not.toHaveBeenCalled();
+    expect(mocks.merge).not.toHaveBeenCalled();
+    const execution = await mocks.execution.mock.calls[0]![0];
+    const meta = JSON.parse(readFileSync(join(execution.runDirectory!, 'meta.json'), 'utf8'));
+    const saved = new TaskRunner(project).listTaskStateItems().find((task) => task.kind === 'failed');
+    expect({ reason: execution.reason, metaReason: meta.reason, runFailure: meta.failure })
+      .toMatchObject({ reason: expectedReason, metaReason: expectedReason,
+        runFailure: { step: 'report', error: expectedReason } });
+    expect(entry === 'merge' ? saved?.completion?.failureReason : saved?.failure?.error).toBe(expectedReason);
+  });
+
   it('本体例外をerror結果へ変換して後続コメントへ渡す', async () => {
     const error = 'Pull request #123 head changed before resolving review thread';
     mocks.caccia.mockRejectedValue(new Error(error));
-    expect(await run('merge')).toEqual({ merged: false });
+    expect(await run('merge')).toMatchObject({ success: false, merged: false, outcome: 'unresolved' });
     expect(mocks.comment).toHaveBeenCalledWith(123, expect.stringContaining(error), project);
     expect(mocks.merge).not.toHaveBeenCalled();
   });
@@ -833,7 +970,7 @@ describe('Caccia effect through PR workflow execution', () => {
         await worker(input);
         throw new Error('Timed out waiting for CodeRabbit after push');
       });
-      expect(await run('merge')).toEqual({ merged: false });
+      expect(await run('merge')).toMatchObject({ success: false, merged: false, outcome: 'unresolved' });
       const runner = new TaskRunner(project);
       const failed = runner.listFailedTasks()[0]!;
       const clone = activeClone;
@@ -865,24 +1002,50 @@ describe('Caccia effect through PR workflow execution', () => {
         git(clone, 'commit', '-m', 'Retained local change');
       }
       const beforeRetry = git(clone, 'rev-parse', 'HEAD');
+      const remoteBeforeRetry = git(root, '--git-dir', remote, 'rev-parse', 'refs/heads/feature/pr');
+      if (condition === 'initial_head' || condition === 'clone_head') {
+        expect(remoteBeforeRetry).not.toBe(effectHead);
+        expect(git(root, '--git-dir', remote, 'merge-base', effectHead, remoteBeforeRetry))
+          .toBe(remoteBeforeRetry);
+      }
+      let synchronizedHead: string | undefined;
       mocks.execution.mockClear();
       mocks.status.mockClear();
+      mocks.caccia.mockClear();
       mocks.caccia.mockImplementation(async (input) => {
-        expect(input.entry === 'linked' && input.expectedInitialHeadSha).toBe(effectHead);
-        return { outcome: 'success', headSha: effectHead, unresolvedCount: 0 };
+        synchronizedHead = git(clone, 'rev-parse', 'HEAD');
+        expect(input.entry === 'linked' && input.expectedInitialHeadSha).toBe(synchronizedHead);
+        expect(git(clone, 'merge-base', beforeRetry, 'HEAD')).toBe(beforeRetry);
+        expect(git(clone, 'merge-base', remoteBeforeRetry, 'HEAD')).toBe(remoteBeforeRetry);
+        if (condition === 'fast_forward') expect(readFileSync(join(clone, 'local.txt'), 'utf8')).toBe('local\n');
+        if (condition === 'external_head') expect(readFileSync(join(clone, 'external.txt'), 'utf8')).toBe('external\n');
+        return { outcome: 'success', headSha: synchronizedHead, unresolvedCount: 0 };
+      });
+      mocks.merge.mockImplementation((_pr, _cwd, _method, expectedSha) => {
+        expect(expectedSha).toBe(synchronizedHead);
+        expect(git(clone, 'rev-parse', 'HEAD')).toBe(synchronizedHead);
+        merged = true;
+        return { success: true };
       });
       const retry = executePersistedPrMergeTask(claimed, runner, project, undefined, { outputMode: 'silent' });
-      if (condition === 'unchanged') {
-        expect(await retry).toEqual({ merged: true });
-        expect(mocks.merge).toHaveBeenCalledWith(123, project, 'squash', effectHead);
+      if (condition !== 'fetch_head' && condition !== 'initial_head' && condition !== 'clone_head') {
+        expect(await retry).toMatchObject({ success: true, merged: true, outcome: 'merged' });
+        expect(mocks.execution).toHaveBeenCalledOnce();
+        expect(mocks.caccia).toHaveBeenCalledOnce();
+        expect(mocks.merge).toHaveBeenCalledWith(123, project, 'squash', synchronizedHead);
         expect(mocks.status).toHaveBeenCalled();
         expect(mocks.comment).toHaveBeenCalledWith(123,
-          `outcome=success; head=${effectHead}; unresolved=0`, project);
+          `outcome=success; head=${synchronizedHead}; unresolved=0`, project);
       } else {
-        await expect(retry).rejects.toThrow();
+        if (condition === 'fetch_head') {
+          await expect(retry).rejects.toThrow('PR head changed during retry synchronization');
+        } else {
+          await expect(retry).rejects.toThrow();
+        }
         expect(git(clone, 'rev-parse', 'HEAD')).toBe(beforeRetry);
         expect(mocks.execution).not.toHaveBeenCalled();
         expect(mocks.status).not.toHaveBeenCalled();
+        expect(mocks.caccia).not.toHaveBeenCalled();
         expect(mocks.merge).not.toHaveBeenCalled();
       }
     },
@@ -974,7 +1137,7 @@ describe('Caccia effect through PR workflow execution', () => {
         merged = true;
         return { success: true };
       });
-      expect(await run('merge')).toEqual({ merged: true });
+      expect(await run('merge')).toMatchObject({ success: true, merged: true, outcome: 'merged' });
       expect(mocks.caccia).toHaveBeenCalledOnce();
       expect(mocks.comment).toHaveBeenCalledWith(123,
         `outcome=skipped; head=${effectHead}; unresolved=0`, project);
@@ -991,7 +1154,7 @@ describe('Caccia effect through PR workflow execution', () => {
         mocks.details.mockImplementation(async () => ({ ...await details(), [field]: changed }));
         return result;
       });
-      expect(await run('merge')).toEqual({ merged: false });
+      expect(await run('merge')).toMatchObject({ success: false, merged: false, outcome: 'unresolved' });
       expect(git(activeClone, 'rev-parse', 'HEAD')).toBe(pushedHead);
       expect(mocks.comment).toHaveBeenCalledWith(123, expect.stringMatching(/\S/u), project);
       expect(mocks.merge).not.toHaveBeenCalled();
@@ -1004,7 +1167,7 @@ describe('Caccia effect through PR workflow execution', () => {
       const result = await worker(input);
       return { ...result, headSha: pushedHead };
     });
-    expect(await run('merge')).toEqual({ merged: false });
+    expect(await run('merge')).toMatchObject({ success: false, merged: false, outcome: 'unresolved' });
     expect(git(activeClone, 'rev-parse', 'HEAD')).toBe(pushedHead);
     expect(mocks.comment).toHaveBeenCalledWith(123, expect.stringMatching(/\S/u), project);
     expect(mocks.merge).not.toHaveBeenCalled();
@@ -1025,7 +1188,7 @@ describe('Caccia effect through PR workflow execution', () => {
       });
       return result;
     });
-    expect(await run('merge')).toEqual({ merged: false });
+    expect(await run('merge')).toMatchObject({ success: false, merged: false, outcome: 'unresolved' });
     expect(git(activeClone, 'rev-parse', 'HEAD')).toBe(pushedHead);
     expect(mocks.comment).toHaveBeenCalledWith(123, expect.stringMatching(/\S/u), project);
     expect(mocks.merge).not.toHaveBeenCalled();
@@ -1034,7 +1197,7 @@ describe('Caccia effect through PR workflow execution', () => {
   it('forkの修正後の再検査に失敗した場合はerrorを返してmergeしない', async () => {
     sameRepository = false;
     mocks.threat.mockResolvedValueOnce({ passed: true }).mockResolvedValue({ passed: false, comment: 'unsafe change' });
-    expect(await run('merge')).toEqual({ merged: false });
+    expect(await run('merge')).toMatchObject({ success: false, merged: false, outcome: 'unresolved' });
     expect(mocks.caccia).toHaveBeenCalledOnce();
     expect(mocks.threat).toHaveBeenCalledTimes(2);
     expect(mocks.comment).toHaveBeenCalledWith(123, expect.stringMatching(/\S/u), project);

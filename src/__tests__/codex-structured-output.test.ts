@@ -13,7 +13,8 @@ vi.mock('../infra/managed-providers/loader.js', () => import('./helpers/managed-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CodexOptions, ThreadOptions, TurnOptions } from '@openai/codex-sdk';
 import type { CodexCallOptions } from '../infra/codex/types.js';
-import { runCodexMcpList } from '../infra/codex/mcp-list.js';
+import { CodexProvider } from '../infra/providers/codex.js';
+import { hasCodexMcpServer, runCodexMcpList } from '../infra/codex/mcp-list.js';
 
 const {
   mockBuildCodexSkillConfig,
@@ -76,7 +77,7 @@ vi.mock('@openai/codex-sdk', () => {
 vi.mock('../infra/codex/skill-config.js', () => ({
   buildCodexSkillConfig: mockBuildCodexSkillConfig,
 }));
-vi.mock('../infra/codex/mcp-list.js', () => ({ runCodexMcpList: vi.fn() }));
+vi.mock('../infra/codex/mcp-list.js', () => ({ runCodexMcpList: vi.fn(), hasCodexMcpServer: vi.fn() }));
 
 vi.mock('../shared/utils/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../shared/utils/index.js')>()),
@@ -87,6 +88,126 @@ vi.mock('../shared/utils/index.js', async (importOriginal) => ({
 const { CodexClient } = await import('../infra/codex/client.js');
 
 describe('CodexClient — structuredOutput 抽出', () => {
+  const permissionCases = [
+    { edit: false, permissionMode: undefined, sandbox: 'read-only' },
+    { edit: false, permissionMode: 'full', sandbox: 'read-only' },
+    { edit: true, permissionMode: 'readonly', sandbox: 'read-only' },
+    { edit: undefined, permissionMode: 'readonly', sandbox: 'read-only' },
+    { edit: true, permissionMode: 'edit', sandbox: 'workspace-write' },
+    { edit: true, permissionMode: 'full', sandbox: 'danger-full-access' },
+    { edit: undefined, permissionMode: undefined, sandbox: 'workspace-write' },
+  ] as const;
+
+  it.each(permissionCases.flatMap((entry) => [true, false, undefined].flatMap((networkAccess) =>
+    [undefined, 'existing-thread'].map((sessionId) => ({ ...entry, networkAccess, sessionId })),
+  )))('passes Phase 1 permissions to the SDK (edit=$edit, mode=$permissionMode, network=$networkAccess, session=$sessionId)', async ({ edit, permissionMode, sandbox, networkAccess, sessionId }) => {
+    mockEvents = [
+      { type: 'item.completed', item: { type: 'agent_message', text: '{}' } },
+      { type: 'turn.completed' },
+    ];
+    const result = await new CodexProvider().setup({ name: 'reviewer', systemPrompt: 'Review' }).call('Inspect', {
+      cwd: '/tmp', executionPhase: 1, edit, permissionMode, sessionId, outputSchema: { type: 'object' },
+      providerOptions: { codex: { permissionControl: 'takt', networkAccess } },
+    });
+    expect(result.status).toBe('done');
+    expect(lastThreadOptions?.approvalPolicy).toBe('never');
+    const config = lastCodexConstructorOptions?.config;
+    if (sandbox === 'read-only' && networkAccess === true) {
+      expect(lastThreadOptions).not.toHaveProperty('sandboxMode');
+      expect(lastThreadOptions).not.toHaveProperty('networkAccessEnabled');
+      expect(config).toMatchObject({
+        default_permissions: 'takt-readonly-network',
+        permissions: { 'takt-readonly-network': { extends: ':read-only', network: { enabled: true } } },
+      });
+    } else {
+      expect(lastThreadOptions?.sandboxMode).toBe(sandbox);
+      expect(lastThreadOptions?.networkAccessEnabled).toBe(networkAccess);
+      expect(config).not.toHaveProperty('default_permissions');
+      expect(config).not.toHaveProperty('permissions');
+    }
+    expect(config).not.toHaveProperty('sandbox_mode');
+    expect(config).not.toHaveProperty('sandbox_workspace_write');
+  });
+
+  it.each(['takt', 'codex'] as const)('keeps Phase 2 read-only with network and AI review requested (control=%s)', async (permissionControl) => {
+    mockEvents = [{ type: 'turn.completed' }];
+    expect((await new CodexProvider().setup({ name: 'reporter' }).call('Report', {
+      cwd: '/tmp', executionPhase: 2, edit: false, permissionMode: 'full', aiReviewPermissions: true,
+      providerOptions: { codex: { permissionControl, networkAccess: true } },
+    })).status).toBe('done');
+    expect(lastThreadOptions).toMatchObject({ sandboxMode: 'read-only', networkAccessEnabled: false, approvalPolicy: 'never' });
+    expect(lastCodexConstructorOptions?.config).not.toHaveProperty('default_permissions');
+    expect(lastCodexConstructorOptions?.config).not.toHaveProperty('permissions');
+    expect(lastCodexConstructorOptions?.config).not.toHaveProperty('approvals_reviewer');
+  });
+
+  it.each(['takt', 'codex'] as const)('keeps isolated structured calls read-only and offline with network and AI review requested (control=%s)', async (permissionControl) => {
+    mockEvents = [
+      { type: 'item.completed', item: { type: 'agent_message', text: '{}' } },
+      { type: 'turn.completed' },
+    ];
+    const result = await new CodexProvider().setupIsolatedStructured({ name: 'selector' }).call('Choose', {
+      cwd: '/tmp', executionPhase: 1, edit: false, permissionMode: 'full', outputSchema: { type: 'object' }, aiReviewPermissions: true,
+      providerOptions: { codex: { permissionControl, networkAccess: true } },
+    });
+    expect(result.status).toBe('done');
+    expect(lastThreadOptions).toMatchObject({ sandboxMode: 'read-only', networkAccessEnabled: false, approvalPolicy: 'never' });
+    expect(lastCodexConstructorOptions?.config).not.toHaveProperty('default_permissions');
+    expect(lastCodexConstructorOptions?.config).not.toHaveProperty('permissions');
+    expect(lastCodexConstructorOptions?.config).not.toHaveProperty('approvals_reviewer');
+  });
+
+  it.each([
+    { permissionControl: 'takt', sessionId: undefined },
+    { permissionControl: 'codex', sessionId: undefined },
+    { permissionControl: 'takt', sessionId: 'existing-session' },
+    { permissionControl: 'codex', sessionId: 'existing-session' },
+  ] as const)('respects permission control for edit=false in Phase 1 ($permissionControl, $sessionId)', async ({ permissionControl, sessionId }) => {
+    mockEvents = [{ type: 'turn.completed' }];
+    const result = await new CodexProvider().setup({ name: 'reviewer' }).call('Review', {
+      cwd: '/tmp', edit: false, permissionMode: 'edit', executionPhase: 1, sessionId,
+      providerOptions: { codex: { permissionControl } },
+    });
+    expect(result.status).toBe('done');
+    expect(lastThreadOptions?.sandboxMode).toBe(permissionControl === 'takt' ? 'read-only' : undefined);
+    expect(lastThreadOptions?.approvalPolicy).toBe('never');
+    if (sessionId === undefined) {
+      expect(mockStartThread).toHaveBeenCalledOnce();
+      expect(mockResumeThread).not.toHaveBeenCalled();
+    } else {
+      expect(mockResumeThread).toHaveBeenCalledWith(sessionId, lastThreadOptions);
+      expect(mockStartThread).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([undefined, true])('preserves delegated permissions in Phase 1 when edit=%s', async (edit) => {
+    mockEvents = [{ type: 'turn.completed' }];
+    await new CodexProvider().setup({ name: 'coder' }).call('Work', {
+      cwd: '/tmp', edit, permissionMode: 'readonly', executionPhase: 1,
+      providerOptions: { codex: { permissionControl: 'codex' } },
+    });
+    expect(lastThreadOptions).not.toHaveProperty('sandboxMode');
+  });
+
+  it.each(['takt', 'codex'] as const)('enforces edit=false over full permissions with permission_control=%s', async (permissionControl) => {
+    mockEvents = [{ type: 'turn.completed' }];
+    await new CodexProvider().setup({ name: 'coder' }).call('Work', {
+      cwd: '/tmp', edit: false, permissionMode: 'full', executionPhase: 1,
+      providerOptions: { codex: { permissionControl } },
+    });
+    expect(lastThreadOptions?.sandboxMode).toBe(permissionControl === 'takt' ? 'read-only' : undefined);
+  });
+
+  it.each([undefined, 'existing-session'])('forces read-only sandbox in Phase 2 with delegated Codex permissions (session=%s)', async (sessionId) => {
+    mockEvents = [{ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }];
+    const agent = new CodexProvider().setup({ name: 'reporter' });
+    const result = await agent.call('Report current work', {
+      cwd: '/tmp', permissionMode: 'full', providerOptions: { codex: { permissionControl: 'codex' } }, executionPhase: 2, sessionId,
+    });
+    expect(result.status).toBe('done');
+    expect(lastThreadOptions).toMatchObject({ sandboxMode: 'read-only', approvalPolicy: 'never' });
+  });
+
   it('通常のタスク実行には manager のフック設定を追加しない', async () => {
     mockEvents = [{ type: 'turn.completed' }];
     const result = await new CodexClient().call('coder', 'prompt', { cwd: '/tmp', fastMode: true });
@@ -104,7 +225,7 @@ describe('CodexClient — structuredOutput 抽出', () => {
       cwd: '/tmp', fastMode: true, permissionMode: 'readonly', internalAgentIsolation: 'strict-readonly',
       outputSchema: { type: 'object', additionalProperties: false },
     };
-    expect((await new CodexClient().call('manager-permission-judge', 'judge', options)).status).toBe('done');
+    expect((await new CodexClient().call('structured-output-fixture', 'judge', options)).status).toBe('done');
     expect(lastCodexConstructorOptions?.config?.features).toMatchObject({ hooks: false, fast_mode: true });
     expect(lastThreadOptions).toMatchObject({ sandboxMode: 'read-only', approvalPolicy: 'never' });
   });
@@ -119,6 +240,61 @@ describe('CodexClient — structuredOutput 抽出', () => {
     delete process.env.TAKT_OBSERVABILITY;
     delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     vi.mocked(runCodexMcpList).mockReset();
+    vi.mocked(hasCodexMcpServer).mockReset();
+  });
+
+  it.each([[true, undefined], [false, undefined], [true, 'review']] as const)('applies exclusions only to existing native servers in the normal SDK route (ambient=%s, profile=%s)', async (ambient, configProfile) => {
+    vi.mocked(hasCodexMcpServer).mockResolvedValue(ambient);
+    mockEvents = [{ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }];
+    const preparedMcp = { dispose: async () => {}, excludedServerNames: ['datadog'], config: {
+      shell_environment_policy: { filters: { MCP_HEADER_ACCESS: 'exclude' as const } },
+    } };
+    const result = await new CodexClient().call('coder', 'prompt', { cwd: '/repo', preparedMcp, configProfile });
+    expect(result.status).toBe('done');
+    expect(vi.mocked(hasCodexMcpServer).mock.calls[0]?.[0]).toMatchObject({ serverName: 'datadog', configProfile });
+    expect(lastCodexConstructorOptions?.configOverrides).toEqual(ambient ? ['mcp_servers.datadog.enabled=false'] : undefined);
+    expect(lastCodexConstructorOptions?.config).toMatchObject({ shell_environment_policy: { filters: { MCP_HEADER_ACCESS: 'exclude' } } });
+  });
+
+  it('returns MCP exclusion preparation failures as provider errors', async () => {
+    vi.mocked(hasCodexMcpServer).mockRejectedValue(new Error('Codex MCP configuration is invalid'));
+    const onStream = vi.fn();
+
+    const result = await new CodexClient().call('coder', 'prompt', {
+      cwd: '/repo', onStream,
+      preparedMcp: { dispose: async () => {}, excludedServerNames: ['datadog'] },
+    });
+
+    expect(result.status).toBe('error');
+    expect(result.failureCategory).toBe('provider_error');
+    expect(result.error).toContain('Codex MCP configuration is invalid');
+    expect(onStream).toHaveBeenCalledWith({
+      type: 'result',
+      data: expect.objectContaining({ success: false, failureCategory: 'provider_error' }),
+    });
+    expect(mockStartThread).not.toHaveBeenCalled();
+  });
+
+  it('keeps configured MCP transports in the table override used for dotted exclusions', async () => {
+    vi.mocked(hasCodexMcpServer).mockResolvedValue(true);
+    mockEvents = [{ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }];
+
+    const result = await new CodexClient().call('coder', 'prompt', {
+      cwd: '/repo',
+      preparedMcp: {
+        dispose: async () => {},
+        excludedServerNames: ['name.with.dots'],
+        config: { mcp_servers: {
+          retained: { command: 'node', args: ['retained.js'] },
+          'name.with.dots': { url: 'https://example.com/mcp', http_headers: { 'X-Key': 'value' } },
+        } },
+      },
+    });
+
+    expect(result.status).toBe('done');
+    expect(lastCodexConstructorOptions?.configOverrides).toEqual([
+      'mcp_servers={"retained" = {"command" = "node", "args" = ["retained.js"]}, "name.with.dots" = {"url" = "https://example.com/mcp", "http_headers" = {"X-Key" = "value"}, "enabled" = false}}',
+    ]);
   });
 
   it('MCP-only の一覧取得とセッションに同じ CLI・環境・設定を渡し、既存 MCP をすべて無効にする', async () => {
@@ -131,7 +307,8 @@ describe('CodexClient — structuredOutput 抽出', () => {
     const controller = new AbortController();
     const options: CodexCallOptions = {
       cwd: '/tmp', codexPathOverride: '/opt/codex', mcpOnlySideEffects: true,
-      permissionMode: 'full', networkAccess: true, fastMode: true,
+      executionPhase: 1, edit: false,
+      permissionMode: 'full', networkAccess: true, fastMode: true, aiReviewPermissions: true,
       skills: { repo: true, user: true }, model: 'test-model', reasoningEffort: 'high',
       childProcessEnv: { CODEX_HOME: '/temporary/codex-home' }, abortSignal: controller.signal,
       preparedMcp: { dispose: async () => {}, config: { mcp_servers: { unique_manager: { command: 'node', args: ['unused.js'] } } } },
@@ -146,6 +323,8 @@ describe('CodexClient — structuredOutput 抽出', () => {
     expect(listInput.env).toEqual(lastCodexConstructorOptions?.env);
     expect(lastCodexConstructorOptions?.codexPathOverride).toBe(listInput.executablePath);
     expect(lastThreadOptions).toMatchObject({ workingDirectory: '/tmp', sandboxMode: 'read-only', networkAccessEnabled: false, webSearchMode: 'disabled', approvalPolicy: 'never' });
+    expect(listInput.configOverrides.filter((override) => override.startsWith('approvals_reviewer='))).toEqual([]);
+    expect(listInput.configOverrides.some((override) => /^(default_permissions|permissions)\./.test(override) || override.startsWith('default_permissions='))).toBe(false);
     expect(listInput.configOverrides).toEqual(expect.arrayContaining([
       'model="test-model"', 'model_reasoning_effort="high"', 'features.fast_mode=true',
       'sandbox_mode="read-only"', 'approval_policy="never"',
@@ -163,10 +342,13 @@ describe('CodexClient — structuredOutput 抽出', () => {
 
   it.each([true, false])('MCP-only の同名サーバーが enabled=%s の場合、SDK セッション開始前に失敗する', async (enabled) => {
     vi.mocked(runCodexMcpList).mockResolvedValue(JSON.stringify([{ name: 'unique_manager', enabled }]));
-    await expect(new CodexClient().call('manager', 'prompt', {
+    const result = await new CodexClient().call('manager', 'prompt', {
       cwd: '/tmp', codexPathOverride: '/opt/codex', mcpOnlySideEffects: true,
       preparedMcp: { dispose: async () => {}, config: { mcp_servers: { unique_manager: { command: 'node' } } } },
-    })).rejects.toThrow();
+    });
+    expect(result.status).toBe('error');
+    expect(result.failureCategory).toBe('provider_error');
+    expect(result.error).toContain('TAKT MCP server name conflicts');
     expect(lastCodexConstructorOptions).toBeUndefined();
     expect(mockStartThread).not.toHaveBeenCalled();
   });
@@ -174,18 +356,30 @@ describe('CodexClient — structuredOutput 抽出', () => {
   it.each(['not-json', '{}', '[{"name":"extra"}]', '[{"enabled":true}]', '[{"name":"extra","enabled":"true"}]', '[null]'])
   ('MCP-only の一覧が不正な場合、SDK セッション開始前に失敗する: %s', async (json) => {
     vi.mocked(runCodexMcpList).mockResolvedValue(json);
-    await expect(new CodexClient().call('manager', 'prompt', {
+    const result = await new CodexClient().call('manager', 'prompt', {
       cwd: '/tmp', codexPathOverride: '/opt/codex', mcpOnlySideEffects: true,
-    })).rejects.toThrow();
+    });
+    expect(result.status).toBe('error');
+    expect(result.failureCategory).toBe('provider_error');
     expect(lastCodexConstructorOptions).toBeUndefined();
     expect(mockStartThread).not.toHaveBeenCalled();
   });
 
-  it('MCP-only の一覧取得が失敗した場合、SDK セッション開始前に失敗する', async () => {
+  it('MCP-only の一覧取得が失敗した場合、provider error を返して SDK セッションを開始しない', async () => {
     vi.mocked(runCodexMcpList).mockRejectedValue(new Error('list failed'));
-    await expect(new CodexClient().call('manager', 'prompt', {
-      cwd: '/tmp', codexPathOverride: '/opt/codex', mcpOnlySideEffects: true,
-    })).rejects.toThrow();
+    const onStream = vi.fn();
+
+    const result = await new CodexClient().call('manager', 'prompt', {
+      cwd: '/tmp', codexPathOverride: '/opt/codex', mcpOnlySideEffects: true, onStream,
+    });
+
+    expect(result.status).toBe('error');
+    expect(result.failureCategory).toBe('provider_error');
+    expect(result.error).toContain('list failed');
+    expect(onStream).toHaveBeenCalledWith({
+      type: 'result',
+      data: expect.objectContaining({ success: false, failureCategory: 'provider_error' }),
+    });
     expect(lastCodexConstructorOptions).toBeUndefined();
     expect(mockStartThread).not.toHaveBeenCalled();
   });
@@ -474,6 +668,8 @@ describe('CodexClient — structuredOutput 抽出', () => {
 
       await client.call('coder', 'prompt', {
         cwd: '/tmp',
+        executionPhase: 1,
+        edit: false,
         permissionMode: 'readonly',
         permissionControl: 'codex',
         networkAccess,
@@ -496,6 +692,8 @@ describe('CodexClient — structuredOutput 抽出', () => {
       expect(lastThreadOptions).toMatchObject({ approvalPolicy: 'never' });
       expect(lastThreadOptions).not.toHaveProperty('sandboxMode');
       expect(lastThreadOptions).not.toHaveProperty('networkAccessEnabled');
+      expect(lastCodexConstructorOptions?.config).not.toHaveProperty('default_permissions');
+      expect(lastCodexConstructorOptions?.config).not.toHaveProperty('permissions');
       expect(mockLogger.warn).not.toHaveBeenCalled();
     },
   );
@@ -609,7 +807,7 @@ describe('CodexClient — structuredOutput 抽出', () => {
     expect(lastThreadOptions).not.toHaveProperty('networkAccessEnabled');
   });
 
-  it('permission_control=takt は従来の sandbox と network mapping を明示的に維持する', async () => {
+  it.each([undefined, 'takt'] as const)('permission_control=%s は readonly と network_access=true を権限プロファイルで渡す', async (permissionControl) => {
     mockEvents = [
       { type: 'thread.started', thread_id: 'thread-1' },
       { type: 'turn.completed', usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } },
@@ -619,14 +817,15 @@ describe('CodexClient — structuredOutput 抽出', () => {
     await client.call('coder', 'prompt', {
       cwd: '/tmp',
       permissionMode: 'readonly',
-      permissionControl: 'takt',
+      permissionControl,
       networkAccess: true,
     });
 
-    expect(lastThreadOptions).toMatchObject({
-      sandboxMode: 'read-only',
-      networkAccessEnabled: true,
-      approvalPolicy: 'never',
+    expect(lastThreadOptions).not.toHaveProperty('sandboxMode');
+    expect(lastThreadOptions).not.toHaveProperty('networkAccessEnabled');
+    expect(lastCodexConstructorOptions?.config).toMatchObject({
+      default_permissions: 'takt-readonly-network',
+      permissions: { 'takt-readonly-network': { extends: ':read-only', network: { enabled: true } } },
     });
   });
 

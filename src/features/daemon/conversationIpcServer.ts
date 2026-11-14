@@ -1,5 +1,5 @@
 import { createServer, createConnection, type Socket } from 'node:net';
-import { chmodSync, lstatSync, mkdirSync, rmSync, unlinkSync } from 'node:fs';
+import { chmod, lstat, mkdir, rm, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { conversationIpcEndpoint, readDaemonIpcState, writeDaemonIpcState } from '../../infra/daemon/ipcEndpoint.js';
@@ -26,21 +26,21 @@ async function endpointIsListening(endpoint: string): Promise<boolean> {
 async function prepareEndpoint(configDirectory: string, endpoint: string, owner: DaemonOwner): Promise<void> {
   if (process.platform === 'win32') return;
   const directory = dirname(endpoint);
-  try { mkdirSync(directory, { mode: 0o700 }); }
+  try { await mkdir(directory, { mode: 0o700 }); }
   catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error; }
-  const stat = lstatSync(directory);
+  const stat = await lstat(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid!()) throw new Error('Unsafe IPC endpoint directory');
-  chmodSync(directory, 0o700);
+  await chmod(directory, 0o700);
   let socket;
-  try { socket = lstatSync(endpoint); }
+  try { socket = await lstat(endpoint); }
   catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
   if (socket === undefined) return;
   if (!socket.isSocket() || socket.uid !== process.getuid!()) throw new Error('Existing IPC endpoint is not an owned socket');
-  const previous = readDaemonIpcState(configDirectory);
+  const previous = await readDaemonIpcState(configDirectory);
   if (previous === undefined || previous.endpoint !== endpoint || previous.owner.pid === owner.pid
-    && previous.owner.identity.startTime === owner.identity.startTime || isDaemonOwnerRunning(previous.owner)
+    && previous.owner.identity.startTime === owner.identity.startTime || await isDaemonOwnerRunning(previous.owner, { signal: new AbortController().signal, timeoutMs: 5000 })
     || await endpointIsListening(endpoint)) throw new Error('Existing IPC endpoint cannot be safely removed');
-  unlinkSync(endpoint);
+  await unlink(endpoint);
 }
 
 interface ActiveRead {
@@ -61,28 +61,40 @@ function attachConnection(socket: Socket, service: ConversationInput, configDire
   const decoder = new ConversationFrameDecoder();
   const owned = new Set<string>();
   let authenticated = false;
+  let awaitingOpen = false;
+  const finishInitializing = (): void => {
+    if (!awaitingOpen) return;
+    awaitingOpen = false;
+    onInitializingChange(-1);
+  };
   let pumping = false;
   let pendingRequests = 0;
+  let pendingRequestBytes = 0;
   const controlWaiters = new Set<() => void>();
   const wakeControls = (): void => { for (const wake of controlWaiters) wake(); controlWaiters.clear(); };
   let wakeWriter: (() => void) | undefined;
   let snapshot: ActiveRead | undefined;
+  let initialReadComplete = false;
   let control: { value: unknown; resolve(): void; reject(error: unknown): void } | undefined;
   let state: { conversationId: string; output: PortOutput; version: OutputVersion } | undefined;
-  const outputs: Array<{ iterator: ReturnType<typeof conversationTransferFrames>;
+  let activity: { conversationId: string; output: Extract<PortOutput, { kind: 'activity' }>; version: OutputVersion } | undefined;
+  const outputs: Array<{ iterator: ReturnType<typeof conversationTransferFrames>; started: boolean;
+    conversationId: string; transferId: string; signal?: AbortSignal;
     resolve(result: { kind: 'delivered' } | { kind: 'unavailable'; reason: string }): void }> = [];
   const cancelRead = (): void => {
     const old = snapshot;
     snapshot = undefined;
-    if (old !== undefined) { old.cancelled = true; void old.iterator.return(undefined).catch(() => { socket.destroy(); }); }
+    if (old !== undefined) { old.cancelled = true; old.read.cancel(); void old.iterator.return(undefined).catch(() => { socket.destroy(); }); }
   };
   const fail = (): void => {
+    finishInitializing();
     wakeControls();
     wakeWriter?.();
     cancelRead();
     control?.reject(new Error('IPC receiver unavailable')); control = undefined;
     for (const queued of outputs.splice(0)) queued.resolve({ kind: 'unavailable', reason: 'disconnected' });
     state = undefined;
+    activity = undefined;
     for (const id of owned) service.detach(id);
     owned.clear();
     socket.destroy();
@@ -110,7 +122,7 @@ function attachConnection(socket: Socket, service: ConversationInput, configDire
           current.boundary = next.value.boundary;
           continue;
         }
-        if (state !== undefined && (current === undefined || current.boundary)) {
+        if (state !== undefined && outputs[0]?.started !== true && (current === undefined || current.boundary)) {
           const latest = state; state = undefined;
           for await (const fragment of conversationTransferFrames(latest.conversationId,
             { ...latest.version, transferId: randomUUID() }, 'output', (async function* () { yield latest.output; })())) {
@@ -121,8 +133,25 @@ function attachConnection(socket: Socket, service: ConversationInput, configDire
         if (outputs.length > 0) {
           const current = outputs[0]!;
           const next = await current.iterator.next();
+          if (current.signal?.aborted) {
+            outputs.shift();
+            await current.iterator.return(undefined);
+            if (current.started) await writeConversationFrame(socket, { protocolVersion: 1, type: 'event',
+              conversationId: current.conversationId, output: { kind: 'transfer_error', transferId: current.transferId, code: 'interrupted' } });
+            current.resolve({ kind: 'unavailable', reason: 'interrupted' });
+            continue;
+          }
           if (next.done) { outputs.shift(); current.resolve({ kind: 'delivered' }); }
-          else await writeConversationFrame(socket, next.value.frame);
+          else { await writeConversationFrame(socket, next.value.frame); current.started = true; }
+          continue;
+        }
+        // 初期 state が届く前の activity はクライアントが破棄するため、読込完了まで保持する。
+        if (activity !== undefined && initialReadComplete && (current === undefined || current.boundary)) {
+          const latest = activity; activity = undefined;
+          for await (const fragment of conversationTransferFrames(latest.conversationId,
+            { ...latest.version, transferId: randomUUID() }, 'output', (async function* () { yield latest.output; })())) {
+            await writeConversationFrame(socket, fragment.frame);
+          }
           continue;
         }
         if (current === undefined) break;
@@ -138,7 +167,13 @@ function attachConnection(socket: Socket, service: ConversationInput, configDire
           await writeConversationFrame(socket, next.value.frame);
           current.started = true;
           current.boundary = next.value.boundary;
+          if (next.value.terminal && !current.cancelled && snapshot === current) {
+            initialReadComplete = true;
+            current.read.complete();
+          }
         } catch {
+          current.read.cancel();
+          await current.iterator.return(undefined);
           if (snapshot === current) snapshot = undefined;
           if (!current.cancelled) await writeConversationFrame(socket, { protocolVersion: 1, type: 'event',
             conversationId: current.read.conversationId, output: { kind: 'transfer_error', transferId: current.read.transferId, code: 'read_failed' } });
@@ -165,11 +200,18 @@ function attachConnection(socket: Socket, service: ConversationInput, configDire
     void pump();
   };
   const delivery: ConversationDelivery = {
-    async deliver(conversationId, value, version) {
+    async deliver(conversationId, value, version, signal) {
+      if (signal?.aborted) return { kind: 'unavailable', reason: 'interrupted' };
       if (socket.destroyed) return { kind: 'unavailable', reason: 'disconnected' };
       if (value.kind === 'snapshot') { beginRead(value.read); return { kind: 'delivered' }; }
       if (value.kind === 'pending' || value.kind === 'running') {
         state = { conversationId, output: value, version };
+        wakeWriter?.();
+        void pump();
+        return { kind: 'delivered' };
+      }
+      if (value.kind === 'activity') {
+        activity = { conversationId, output: value, version };
         wakeWriter?.();
         void pump();
         return { kind: 'delivered' };
@@ -179,8 +221,9 @@ function attachConnection(socket: Socket, service: ConversationInput, configDire
         return { kind: 'unavailable', reason: 'output capacity unavailable' };
       }
       return new Promise((resolve) => {
-        outputs.push({ iterator: conversationTransferFrames(conversationId, { ...version, transferId: randomUUID() },
-          'output', (async function* () { yield value; })()), resolve });
+        const transferId = randomUUID();
+        outputs.push({ iterator: conversationTransferFrames(conversationId, { ...version, transferId },
+          'output', (async function* () { yield value; })()), started: false, conversationId, transferId, signal, resolve });
         wakeWriter?.();
         void pump();
       });
@@ -193,6 +236,9 @@ function attachConnection(socket: Socket, service: ConversationInput, configDire
     if (request.method === 'hello') {
       if (authenticated || !timingSafeEqual(Buffer.from(capability, 'hex'), Buffer.from(request.params.capability, 'hex'))) { fail(); return; }
       authenticated = true;
+      // readiness と最初の attachment を、同じ接続の寿命で連続させる。
+      awaitingOpen = true;
+      onInitializingChange(1);
       await response({ owner });
       return;
     }
@@ -201,12 +247,14 @@ function attachConnection(socket: Socket, service: ConversationInput, configDire
       if (request.method === 'open') {
         onInitializingChange(1);
         try {
+          if (request.params.binding.port !== 'tui') throw new ConversationError('invalid_input');
           const resolved = await port.resolve(request.params.assignment);
           if (JSON.stringify(request.params.binding) !== JSON.stringify(resolved.binding)
             || JSON.stringify(request.params.speaker) !== JSON.stringify(resolved.speaker)) throw new ConversationError('invalid_input');
           const opened = await service.open(request.params, port.delivery);
-          if (socket.destroyed) { service.detach(opened.attachmentId); await opened.read.items[Symbol.asyncIterator]().return?.(); return; }
+          if (socket.destroyed) { service.detach(opened.attachmentId); opened.read.cancel(); return; }
           owned.add(opened.attachmentId);
+          finishInitializing();
           await response({ attachmentId: opened.attachmentId, read: snapshotMetadata(opened.read) });
           beginRead(opened.read);
         } finally { onInitializingChange(-1); }
@@ -239,22 +287,25 @@ function attachConnection(socket: Socket, service: ConversationInput, configDire
     if (reading) return;
     reading = true;
     try {
-      while (!socket.destroyed && socket.readableLength > 0) {
+      while (!socket.destroyed && socket.readableLength > 0
+        && (pendingRequestBytes < INPUT_BATCH_BYTES || pendingRequests === 1)) {
         const chunk = socket.read(Math.min(INPUT_BATCH_BYTES, socket.readableLength)) as Buffer | null;
         if (chunk === null) break;
-        // Admit every complete frame in this bounded batch before awaiting any
-        // response. Only admitted results wait for the writer; mutations are
-        // never deferred for reevaluation. Each frame consumes at least one
-        // newline byte, bounding producers by INPUT_BATCH_BYTES per connection.
-        const responses: Promise<void>[] = [];
+        // Admit the whole bounded batch so competing mutations are never queued
+        // for reevaluation. One large pending frame still leaves room for a
+        // second request. Frame limits and the byte budget bound further input.
         for (const value of decoder.decode(chunk)) {
+          const requestBytes = Buffer.byteLength(JSON.stringify(value)!) + 1;
           pendingRequests++;
-          responses.push(dispatch(value).catch(fail).finally(() => {
+          pendingRequestBytes += requestBytes;
+          void dispatch(value).catch(fail).finally(() => {
             pendingRequests--;
+            pendingRequestBytes -= requestBytes;
             void pump();
-          }));
+            void receive();
+          });
         }
-        await Promise.all(responses);
+        await new Promise<void>((resolve) => { setImmediate(resolve); });
       }
     } catch { fail(); }
     finally { reading = false; }
@@ -280,8 +331,8 @@ export async function createConversationIpcServer(configDirectory: string, owner
   });
   try {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(endpoint, resolve); });
-    if (process.platform !== 'win32') chmodSync(endpoint, 0o600);
-    writeDaemonIpcState(configDirectory, { protocolVersion: 1, endpoint, owner, capability });
+    if (process.platform !== 'win32') await chmod(endpoint, 0o600);
+    await writeDaemonIpcState(configDirectory, { protocolVersion: 1, endpoint, owner, capability });
   } catch (error) {
     for (const socket of sockets) socket.destroy();
     if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -295,8 +346,8 @@ export async function createConversationIpcServer(configDirectory: string, owner
       accepting = false;
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
-      const state = readDaemonIpcState(configDirectory);
-      if (state?.capability === capability) rmSync(join(configDirectory, 'daemon-ipc.json'));
+      const state = await readDaemonIpcState(configDirectory);
+      if (state?.capability === capability) await rm(join(configDirectory, 'daemon-ipc.json'));
     },
   };
 }

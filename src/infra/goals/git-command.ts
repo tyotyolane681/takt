@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { spawnManagedProcess } from '../../shared/utils/spawn.js';
 import { buildSafeGitEnvironment } from '../task/git-environment.js';
-import { toLocalBranchRef } from '../../shared/utils/gitBranchValidation.js';
+import { toLocalBranchRef, toRemoteTrackingBranchRef } from '../../shared/utils/gitBranchValidation.js';
 
 export interface GoalGitOutput {
   output: Buffer;
@@ -22,7 +22,7 @@ export async function runGoalGit(
   const managed = spawnManagedProcess('git', [
     '-c', 'commit.gpgSign=false', '-c', 'merge.gpgSign=false', ...args,
   ], {
-    cwd, env: await buildSafeGitEnvironment(cwd, { allowGitHooks: false, allowGitFilters: false }),
+    cwd, env: await buildSafeGitEnvironment(cwd, { allowGitHooks: false, allowGitFilters: false }, signal),
     stdio: ['ignore', 'pipe', 'pipe'],
   }, signal);
   const { child } = managed;
@@ -70,9 +70,34 @@ export async function resolveGoalBranchSha(cwd: string, branch: string, signal: 
   return goalGitText(cwd, ['rev-parse', '--verify', `${toLocalBranchRef(branch)}^{commit}`], signal);
 }
 
+export async function fetchGoalIntegrationBranchSha(cwd: string, branch: string, signal: AbortSignal | undefined): Promise<string> {
+  const localRef = toLocalBranchRef(branch);
+  const remoteRef = toRemoteTrackingBranchRef(branch);
+  const timeout = AbortSignal.timeout(30_000);
+  await goalGitText(cwd, ['fetch', '--no-tags', '--no-write-fetch-head', 'origin', `+${localRef}:${remoteRef}`],
+    signal === undefined ? timeout : AbortSignal.any([signal, timeout]));
+  return goalGitText(cwd, ['rev-parse', '--verify', `${remoteRef}^{commit}`], signal);
+}
+
 export async function isGoalCommitIncluded(cwd: string, source: string, target: string, signal: AbortSignal | undefined): Promise<boolean> {
   const result = await runGoalGit(cwd, ['merge-base', '--is-ancestor', source, target], 0, signal, [0, 1]);
   return result.code === 0;
+}
+
+export async function hasUnpublishedPrWork(
+  cwd: string, branch: string, publishedHeadSha: string | undefined, signal: AbortSignal | undefined,
+): Promise<boolean> {
+  const timeout = AbortSignal.timeout(30_000);
+  const checkSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+  if (await goalGitText(cwd, ['status', '--porcelain', '--untracked-files=all'], checkSignal) !== '') return true;
+  let remoteSha = publishedHeadSha;
+  if (remoteSha === undefined) {
+    const advertised = await runGoalGit(cwd, ['ls-remote', '--exit-code', '--heads', 'origin', toLocalBranchRef(branch)], 4096, checkSignal, [0, 2]);
+    if (advertised.code === 2) return true;
+    if (advertised.truncated) throw new Error('PR remote ref output exceeds the limit');
+    remoteSha = advertised.output.toString('utf8').split(/\s/u)[0]!;
+  }
+  return !await isGoalCommitIncluded(cwd, 'HEAD', remoteSha, checkSignal);
 }
 
 const CONTENT_OUTPUT_LIMIT = 8 * 1024 * 1024;
@@ -131,6 +156,11 @@ function runGoalGitSync(
 
 export function resolveGoalBranchShaSync(cwd: string, branch: string, env: NodeJS.ProcessEnv): string {
   const result = runGoalGitSync(cwd, ['rev-parse', '--verify', `${toLocalBranchRef(branch)}^{commit}`], env, [0]);
+  return parseObjectId(result.stdout.toString('utf8'));
+}
+
+export function resolveGoalRemoteBranchShaSync(cwd: string, branch: string, env: NodeJS.ProcessEnv): string {
+  const result = runGoalGitSync(cwd, ['rev-parse', '--verify', `${toRemoteTrackingBranchRef(branch)}^{commit}`], env, [0]);
   return parseObjectId(result.stdout.toString('utf8'));
 }
 

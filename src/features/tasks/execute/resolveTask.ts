@@ -5,7 +5,10 @@ import {
 } from '../../../infra/config/index.js';
 import {
   type TaskInfo,
+  type WorktreeResult,
   createSharedCloneAbortable,
+  removeClone,
+  removeCloneMeta,
   resolveBaseBranch,
   branchExists,
   summarizeTaskName,
@@ -27,7 +30,7 @@ import {
   type ResolvedTaskSpec,
 } from './taskSpecContext.js';
 import { resolveReusedWorktreeExecution } from './reusedWorktree.js';
-import { validateTaskRetryRestartPoint } from '../taskRetryStartPath.js';
+import { resolveTaskRetryStackPath, validateTaskRetryRestartPoint } from '../taskRetryStartPath.js';
 import type { ExecuteTaskOptions, TaskExecutionContextOverride } from './types.js';
 import { createPullRequestContext, type PullRequestContext } from '../../../core/workflow/pr-context.js';
 import {
@@ -154,6 +157,7 @@ export interface ResolvedTaskExecution {
   resumePoint?: WorkflowResumePoint;
   restartPoint?: WorkflowRestartPoint;
   resumeSource?: RunResumeSource;
+  sourceResumePoint?: WorkflowResumePoint;
   autoPr: boolean;
   draftPr: boolean;
   managedPr: boolean;
@@ -168,6 +172,7 @@ export interface ResolvedTaskExecution {
 export interface ResolveTaskExecutionOptions {
   outputMode?: ExecuteTaskOptions['outputMode'];
   taskContext?: TaskExecutionContextOverride;
+  onCloneCreated?: (clone: WorktreeResult) => void;
 }
 
 function resolveRetryResume(
@@ -206,6 +211,10 @@ function resolveRetryResume(
     throw new Error(`Saved resume position cannot be resolved because workflow "${workflowIdentifier}" was not found`);
   }
   validateWorkflowResumeRoot(workflowConfig, resumePoint);
+  const validation = resolveTaskRetryStackPath(workflowConfig, resumePoint.stack, { projectCwd, lookupCwd });
+  if ('reason' in validation) {
+    throw new Error(validation.reason);
+  }
 
   // Root validation guarantees that trimming can retain at least the root frame.
   const resolvedResumePoint = trimResumePointStackForWorkflow({
@@ -300,6 +309,7 @@ export async function resolveTaskExecution(
   const configuredStartStep = resolveTaskStartStepValue(normalizedData);
   const resumePoint = normalizedData.resume_point;
   const restartPoint = normalizedData.restart_point as WorkflowRestartPoint | undefined;
+  const sourceResumePoint = normalizedData.source_resume_point;
   const contextOverride = options?.taskContext;
   let prContext = resolvePrReviewContext(task.name, normalizedData, defaultCwd, contextOverride);
 
@@ -368,6 +378,13 @@ export async function resolveTaskExecution(
           issueNumber: data.issue,
         }, abortSignal),
       );
+      try {
+        options?.onCloneCreated?.(result);
+      } catch (error) {
+        removeClone(result.path);
+        removeCloneMeta(defaultCwd, result.branch);
+        throw error;
+      }
       throwIfAborted(abortSignal);
       execCwd = result.path;
       branch = result.branch;
@@ -404,7 +421,7 @@ export async function resolveTaskExecution(
     ? { ...(task.sourceRunSlug ? { sourceRunSlug: task.sourceRunSlug } : {}), resumeMode: task.resumeMode }
     : undefined;
   const resolvedReportDirName = reportDirName
-    ?? (resumeSource?.sourceRunSlug === undefined
+    ?? (resumeSource === undefined
       ? generateReportDir(task.content)
       : generateExecutionReportDir(execCwd, task.content));
   const retryResume = resolveRetryResume(
@@ -444,6 +461,7 @@ export async function resolveTaskExecution(
     ...(retryResume.resumePoint ? { resumePoint: retryResume.resumePoint } : {}),
     ...(retryResume.restartPoint ? { restartPoint: retryResume.restartPoint } : {}),
     ...(resumeSource ? { resumeSource } : {}),
+    ...(retryResume.restartPoint !== undefined && sourceResumePoint !== undefined ? { sourceResumePoint } : {}),
     ...(data.issue !== undefined ? { issueNumber: data.issue } : {}),
     ...(prContext
       ? { prNumber: prContext.prNumber }

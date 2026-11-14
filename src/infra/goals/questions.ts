@@ -1,7 +1,5 @@
 import { GoalQuestionSchema, type Goal, type GoalAnswerInput, type GoalQuestion, type GoalQuestionInput } from './schema.js';
-import { createInquiry, withdrawInquiry, answerInquiry, consumeInquiryApproval } from './inquiry.js';
-
-export { isGoalApprovalUsable } from './inquiry.js';
+import { createInquiry, withdrawInquiry, answerInquiry } from './inquiry.js';
 
 export function addGoalQuestion(goal: Goal, input: GoalQuestionInput): { goal: Goal; questionId: string } {
   const question = createInquiry(input);
@@ -17,29 +15,15 @@ export function withdrawGoalQuestion(goal: Goal, questionId: string, reason?: st
   return { ...goal, questions: goal.questions?.map((candidate) => candidate.id === questionId ? withdrawn : candidate) };
 }
 
-export function answerGoalQuestion(goal: Goal, questionId: string, answer: string | GoalAnswerInput): Goal {
+export function answerGoalQuestion(goal: Goal, questionId: string, answer: string | GoalAnswerInput,
+  source: NonNullable<GoalQuestion['answer']>['source'] = 'tui'): Goal {
   const question = goal.questions?.find((candidate) => candidate.id === questionId);
   if (question === undefined) throw new Error('Question does not exist');
-  const answered = answerInquiry(question, answer);
+  const answered = answerInquiry(question, answer, source);
   return {
     ...goal,
     questions: goal.questions?.map((candidate) => candidate.id === questionId ? answered : candidate),
   };
-}
-
-export function isSameGoalOperation(left: GoalQuestion, right: GoalQuestion): boolean {
-  return left.operation !== undefined && right.operation !== undefined
-    && left.operation.toolName === right.operation.toolName
-    && left.operation.argsDigest === right.operation.argsDigest
-    && left.operation.cwd === right.operation.cwd
-    && left.targetSha === right.targetSha;
-}
-
-export function consumeGoalApproval(goal: Goal, questionId: string, consumedAt: string): Goal {
-  const question = goal.questions?.find((candidate) => candidate.id === questionId);
-  if (question === undefined) throw new Error('Question does not exist');
-  const consumed = consumeInquiryApproval(question, consumedAt);
-  return { ...goal, questions: goal.questions?.map((candidate) => candidate.id === questionId ? consumed : candidate) };
 }
 
 export function withdrawPendingGoalQuestions(goal: Goal, reason: string, withdrawnAt: string): Goal {

@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { vi } from 'vitest';
 import { getGlobalConfigDir } from '../../infra/config/paths.js';
-import { createConversationService } from '../../features/manager/conversationService.js';
+import { conversationDaemon } from './conversation-daemon.js';
+import { resolveCurrentManagerAssignment } from '../../features/manager/assignment.js';
 import { createTuiConversationPort } from '../../features/manager/tuiConversationPort.js';
 import { createManagerTurnExecutor } from '../../features/manager/turnExecutor.js';
 import type { ManagerConversationPlan } from '../../features/manager/conversationPlan.js';
@@ -9,6 +10,7 @@ import type { ConversationClientSnapshot } from '../../features/manager/conversa
 import type { ConversationAssignment } from '../../infra/conversations/schema.js';
 import type { ConversationCommand, ConversationDelivery, OperationResult, OutputVersion, PortOutput, SnapshotRead, Submission } from '../../features/manager/conversationPort.js';
 import { ConversationError } from '../../features/manager/conversationErrors.js';
+import { snapshotItemKey, orderSnapshotItems, type SnapshotDisplayItem } from '../../features/manager/snapshotChanges.js';
 
 /** UI tests use the real service/executor; transport validation belongs to client tests. */
 export class ManagerServiceClient {
@@ -21,10 +23,12 @@ export class ManagerServiceClient {
   private reading: Promise<void> | undefined;
   private readGeneration = 0;
   private stateSequence = -1;
+  private committedItems = new Map<string, SnapshotDisplayItem>();
   private pendingOutputs: Array<{ output: Exclude<PortOutput, { kind: 'snapshot' }>; version?: OutputVersion }> = [];
   readonly results: OperationResult[] = [];
   private readonly actor = { namespace: 'local', id: 'operator' };
-  private readonly service;
+  private service!: Awaited<ReturnType<typeof conversationDaemon>>['input'];
+  private daemon!: Awaited<ReturnType<typeof conversationDaemon>>;
   private readonly delivery: ConversationDelivery;
   private readonly configDirectory = getGlobalConfigDir();
   readonly ready: Promise<void>;
@@ -42,8 +46,19 @@ export class ManagerServiceClient {
     if (output.kind === 'pending' || output.kind === 'running') {
       if (version === undefined || version.stateSequence > this.stateSequence) {
         this.stateSequence = version?.stateSequence ?? this.stateSequence;
-        this.update({ state: output.state });
+        const tools = this.committedItems.get('tool_history');
+        const running = output.state.running;
+        const changedHistory = tools?.kind === 'tool_history' && running !== null
+          && (tools.history.operationId !== running.operationId || tools.history.generation !== running.generation);
+        if (changedHistory) {
+          this.committedItems.delete('tool_history');
+        }
+        this.update({ state: output.state, ...(changedHistory ? { items: orderSnapshotItems(this.committedItems) } : {}) });
       }
+    }
+    if (output.kind === 'tool_history') {
+      this.committedItems.set('tool_history', output);
+      this.update({ items: orderSnapshotItems(this.committedItems) });
     }
     if (output.kind === 'result') this.results.push(output.result);
     for (const listener of this.outputs) listener(output);
@@ -53,13 +68,8 @@ export class ManagerServiceClient {
     const configDirectory = this.configDirectory;
     const plan = input.plan;
     let executor: ReturnType<typeof createManagerTurnExecutor> | undefined;
-    const service = createConversationService({ configDirectory,
-      owner: { pid: process.pid, identity: { startTime: 'ui-test' }, version: 'test', cliPath: import.meta.filename },
-      runtime: { resolve: async () => ({ provider: plan.ctx.providerType, model: plan.ctx.model ?? null,
-        language: plan.ctx.lang, contextKey: 'ui-test', executor: executor ??= createManagerTurnExecutor(input.cwd, plan) }), close: async () => {} },
-      onDomainChange() {},
-    });
-    this.service = service;
+    const daemon = conversationDaemon(configDirectory, { resolve: async () => ({ provider: plan.ctx.providerType, model: plan.ctx.model ?? null,
+      language: plan.ctx.lang, contextKey: 'ui-test', executor: executor ??= createManagerTurnExecutor(input.cwd, plan) }), close: async () => {} });
     this.delivery = { deliver: async (_id: string, output: PortOutput, version: OutputVersion) => {
       if (this.closed) return { kind: 'unavailable' as const, reason: 'closed' };
       if (output.kind === 'snapshot') await this.read(() => Promise.resolve(output.read));
@@ -68,7 +78,7 @@ export class ManagerServiceClient {
       }
       return { kind: 'delivered' as const };
     } };
-    this.ready = this.open();
+    this.ready = daemon.then(async (value) => { this.daemon = value; this.service = value.input; await this.open(); });
     void this.ready.catch((error: unknown) => this.update({ connection: 'disconnected', readStatus: 'incomplete',
       error: error instanceof Error ? error.message : String(error) }));
   }
@@ -79,9 +89,14 @@ export class ManagerServiceClient {
     this.attachmentId = undefined;
     this.update({ connection: 'connecting', readStatus: 'reading' });
     const { cwd, assignment, plan } = this.options;
-    const resolved = await createTuiConversationPort(this.configDirectory, this.delivery).resolve(assignment
-      ?? { kind: 'repository', repositoryDirectory: cwd });
+    const selected = assignment ?? { kind: 'repository' as const, repositoryDirectory: cwd };
+    const resolved = await createTuiConversationPort(this.configDirectory, this.delivery).resolve(selected.kind === 'daemon' ? selected
+      : await resolveCurrentManagerAssignment(selected, this.configDirectory));
     if (this.closed || generation !== this.readGeneration) return;
+    if (this.view.state?.conversationId !== resolved.conversationId) {
+      this.committedItems.clear();
+      this.update({ state: null, items: [] });
+    }
     const opened = await this.service.open({ ...resolved, agentOverrides: { provider: plan.ctx.providerType, model: plan.ctx.model } }, this.delivery);
     if (this.closed || generation !== this.readGeneration) { this.service.detach(opened.attachmentId); return; }
     this.attachmentId = opened.attachmentId;
@@ -103,25 +118,34 @@ export class ManagerServiceClient {
     return tracked;
   }
   private async consumeRead(read: SnapshotRead, generation: number): Promise<void> {
-    if (generation !== this.readGeneration) return;
+    if (generation !== this.readGeneration) { read.cancel(); return; }
     if (this.view.readStatus !== 'complete') this.update({ readStatus: 'reading' });
-    const items: ConversationClientSnapshot['items'][number][] = [];
+    const items = new Map(this.committedItems);
+    const updates = new Map<string, SnapshotDisplayItem>();
+    const removed = new Set<string>();
     try {
       for await (const item of read.items) {
-        if (generation !== this.readGeneration) return;
+        if (generation !== this.readGeneration) { read.cancel(); return; }
         if (item.kind === 'state') {
           if (item.state.conversationId !== this.view.state?.conversationId || read.stateSequence > this.stateSequence) {
             this.stateSequence = read.stateSequence;
             this.update({ state: item.state });
           }
         }
-        else items.push(item);
+        else if (item.kind === 'remove') removed.add(item.key);
+        else { const key = snapshotItemKey(item); updates.set(key, item); items.set(key, item); }
       }
-      if (generation !== this.readGeneration) return;
-      this.update({ items, readStatus: 'complete', error: null });
+      if (generation !== this.readGeneration) { read.cancel(); return; }
+      const next = read.mode === 'initial' ? new Map<string, SnapshotDisplayItem>() : new Map(this.committedItems);
+      for (const [key, item] of updates) next.set(key, item);
+      for (const key of removed) next.delete(key);
+      read.complete();
+      this.committedItems = next;
+      this.update({ items: orderSnapshotItems(next), readStatus: 'complete', error: null });
     } catch (error) {
       if (generation !== this.readGeneration) return;
-      this.update({ items, readStatus: 'incomplete' });
+      read.cancel();
+      this.update({ items: orderSnapshotItems(items), readStatus: 'incomplete' });
       throw error;
     }
   }
@@ -169,11 +193,11 @@ export class ManagerServiceClient {
   }
   async dispose(): Promise<void> {
     this.close();
-    await this.service.close();
+    await this.daemon.close();
   }
 }
 
-export async function submitAndWait(client: ManagerServiceClient, command: ConversationCommand): Promise<OperationResult | Submission> {
+export async function submitAndWait(client: ManagerServiceClient, command: ConversationCommand, timeoutMs = 5000): Promise<OperationResult | Submission> {
   await client.ready;
   let operationId: string | undefined;
   let resolve!: (result: OperationResult) => void;
@@ -185,8 +209,9 @@ export async function submitAndWait(client: ManagerServiceClient, command: Conve
   try {
     const result = await client.submit(command, (id) => { operationId = id; });
     if (result.kind !== 'accepted') return result;
+    const timeoutError = new Error(`Conversation operation did not finish (${command.kind}, ${result.operationId})`);
     return await Promise.race([completion, new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('Conversation operation did not finish')), 5000);
+      timer = setTimeout(() => reject(timeoutError), timeoutMs);
     })]);
   } finally { clearTimeout(timer); unsubscribe(); }
 }

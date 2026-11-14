@@ -2,44 +2,54 @@
 
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { URL, pathToFileURL } from 'node:url';
+import { posix } from 'node:path';
+import process from 'node:process';
 import { satisfies } from 'semver';
 
-const sdkVersion = '0.2.1-alpha.2';
-const managedBase = 'managed/deepseek-harness/';
+const sdkVersion = '0.2.1-rc.5';
+
+/** Resolve a peer at the declaring package's placement level, then at ancestor levels. */
+function resolvePeerEntry(packages, packagePath, peerName) {
+  for (let directory = posix.dirname(packagePath); directory !== '.'; directory = posix.dirname(directory)) {
+    if (posix.basename(directory) !== 'node_modules') continue;
+    const candidate = `${directory}/${peerName}`;
+    if (Object.hasOwn(packages, candidate)) return packages[candidate];
+  }
+  return undefined;
+}
 
 /**
- * Verify pinned SDK/runtime versions across development and managed dependency graphs.
- * Also enforce managed-only shipping, required SDK peers, and the fflate safety override.
+ * Verify the managed SDK/runtime graph and keep every DeepSeek package out of the root graph.
+ * Also enforce required SDK peers and safety overrides.
  * @throws {Error} If a manifest, lock entry, version constant, or packaging contract is inconsistent.
  */
 export function verifyDeepSeekManagedLock(root, rootLock, managed, lock, constants) {
-  if (Object.keys(root.dependencies).some((name) => name.startsWith('@deepseek-ai/'))
-    || Object.keys(root.optionalDependencies ?? {}).some((name) => name.startsWith('@deepseek-ai/'))
+  const hasDeepSeekPackage = (dependencies) => Object.keys(dependencies ?? {})
+    .some((name) => name.startsWith('@deepseek-ai/'));
+  if (hasDeepSeekPackage(root.dependencies)
+    || hasDeepSeekPackage(root.devDependencies)
+    || hasDeepSeekPackage(root.optionalDependencies)
+    || hasDeepSeekPackage(root.overrides)
     || root.bundleDependencies?.some((name) => name.startsWith('@deepseek-ai/'))
-    || !(root.files.includes(managedBase) || root.files.includes('managed/'))) {
-    throw new Error('The TAKT package must ship the managed assets without production DeepSeek dependencies');
+    || hasDeepSeekPackage(rootLock.packages?.['']?.dependencies)
+    || hasDeepSeekPackage(rootLock.packages?.['']?.devDependencies)
+    || Object.keys(rootLock.packages ?? {}).some((path) => path.includes('node_modules/@deepseek-ai/'))
+    || !['package.json', 'package-lock.json'].every((name) => root.files.includes(`managed/*/${name}`))) {
+    throw new Error('The TAKT package must ship the managed assets without root DeepSeek dependencies');
   }
   for (const name of ['@deepseek-ai/dsh', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-sdk-client']) {
-    if (managed.dependencies[name] !== sdkVersion || root.devDependencies[name] !== sdkVersion
-      || rootLock.packages?.['']?.devDependencies?.[name] !== sdkVersion
-      || rootLock.packages?.[`node_modules/${name}`]?.version !== sdkVersion) {
-      throw new Error(`${name} must be pinned for managed runtime and development types`);
+    if (managed.dependencies[name] !== sdkVersion) {
+      throw new Error(`${name} must be pinned for the managed runtime and SDK boundary`);
     }
   }
-  for (const [name, version] of Object.entries({
-    '@deepseek-ai/cordis': '4.0.5-alpha.1',
-    '@deepseek-ai/dsh-llm': sdkVersion,
-    '@deepseek-ai/dsh-scope': sdkVersion,
-    '@deepseek-ai/dsh-session': sdkVersion,
-    '@deepseek-ai/dsh-sdk-protocol': sdkVersion,
-    '@deepseek-ai/dsh-subagent': sdkVersion,
-  })) {
-    if (root.devDependencies[name] !== version
-      || rootLock.packages?.['']?.devDependencies?.[name] !== version
-      || rootLock.packages?.[`node_modules/${name}`]?.version !== version
-      || managed.dependencies[name] !== version) {
-      throw new Error(`${name} must be pinned in the root and managed SDK dependency graphs`);
+  if (managed.dependencies['@deepseek-ai/cordis'] !== '4.0.5'
+    || managed.dependencies['@deepseek-ai/cordis-plugin-group'] !== '1.0.5') {
+    throw new Error('The managed npm project must pin Cordis and cordis-plugin-group within the SDK peer ranges');
+  }
+  for (const [name, version] of Object.entries(managed.dependencies)) {
+    if ((name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) && version !== sdkVersion) {
+      throw new Error(`${name} must be pinned to ${sdkVersion} in the managed npm project`);
     }
   }
   if (!constants.includes(`DEEPSEEK_HARNESS_SDK_VERSION = '${sdkVersion}'`)
@@ -49,6 +59,10 @@ export function verifyDeepSeekManagedLock(root, rootLock, managed, lock, constan
   if (managed.overrides?.fflate !== '0.8.3'
     || lock.packages?.['node_modules/fflate']?.version !== '0.8.3') {
     throw new Error('The managed npm project must resolve fflate 0.8.3');
+  }
+  if (managed.overrides?.['@earendil-works/pi-ai'] !== '1.5.0'
+    || lock.packages?.['node_modules/@earendil-works/pi-ai']?.version !== '1.5.0') {
+    throw new Error('The managed npm project must resolve the transitive Pi AI dependency to 1.5.0');
   }
   if (managed.dependencies['@deepseek-ai/libreoffice-kit'] !== '0.1.5') {
     throw new Error('The managed npm project must pin libreoffice-kit 0.1.5');
@@ -61,9 +75,20 @@ export function verifyDeepSeekManagedLock(root, rootLock, managed, lock, constan
   }
   const peers = lock.packages['node_modules/@deepseek-ai/dsh-sdk-client']?.peerDependencies;
   for (const [name, version] of Object.entries(peers ?? {})) {
-    const pinned = name === '@deepseek-ai/cordis' ? '4.0.5-alpha.1' : version;
+    const pinned = name === '@deepseek-ai/cordis' ? '4.0.5' : version;
     if (managed.dependencies[name] !== pinned) {
       throw new Error(`${name} SDK peer must be explicitly pinned in the managed npm project`);
+    }
+  }
+  for (const [packagePath, entry] of Object.entries(lock.packages ?? {})) {
+    if (!packagePath.startsWith('node_modules/')) continue;
+    for (const [peerName, peerRange] of Object.entries(entry?.peerDependencies ?? {})) {
+      const peerEntry = resolvePeerEntry(lock.packages, packagePath, peerName);
+      const optional = entry?.peerDependenciesMeta?.[peerName]?.optional === true;
+      if ((!peerEntry && !optional)
+        || (peerEntry && (typeof peerEntry.version !== 'string' || !satisfies(peerEntry.version, peerRange)))) {
+        throw new Error(`${packagePath} peer ${peerName}@${peerRange} must resolve in the managed npm lock`);
+      }
     }
   }
 }

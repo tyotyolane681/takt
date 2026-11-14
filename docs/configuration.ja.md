@@ -14,9 +14,13 @@ phase 粒度の usage events と集計方法は [Observability Guide](./observab
 ```yaml
 # ~/.takt/config.yaml
 language: en                  # UI 言語: 'en' または 'ja'
+director:
+  slack:
+    channel_id: C0DIR
+    allowed_user_ids: [U0AAA]
 logging:
   level: info                 # ログレベル: debug, info, warn, error
-provider: claude-sdk              # デフォルト provider: claude-sdk, claude, claude-headless, claude-terminal, codex, opencode, deepseek-harness, cursor, copilot, kiro, pi, または mock
+provider: claude-sdk              # デフォルト provider: claude-sdk, claude, claude-headless, claude-terminal, codex, opencode, deepseek-harness, cursor, copilot, kiro, devin, pi, または mock
 model: sonnet                 # デフォルトモデル（省略可、provider にそのまま渡される）
 branch_name_strategy: romaji  # ブランチ名生成方式: 'romaji'（高速）または 'ai'（低速）
 prevent_sleep: false          # 実行中に macOS のアイドルスリープを防止（caffeinate）
@@ -111,6 +115,7 @@ assistant:
 # cursor_cli_path: /usr/local/bin/cursor-agent
 # copilot_cli_path: /usr/local/bin/github-copilot-cli
 # kiro_cli_path: /usr/local/bin/kiro-cli
+# devin_cli_path: /usr/local/bin/devin
 
 # VCS プロバイダー（省略可）
 # git リモート URL から自動検出（github.com → github、gitlab.com → gitlab）
@@ -158,6 +163,8 @@ dynamic parallel と `dynamic_facets` の selector は読み取り専用で、`R
 #   custom_scripts: false                # カスタムスクリプトを許可（デフォルト: false、ビルトインプリセットは常に許可）
 # workflow_command_gates:                # workflow YAML command quality gate ポリシー
 #   custom_scripts: false                # workflow YAML の command gate を許可（デフォルト: false）
+# workflow_system_commands:             # workflow の system command input を許可するポリシー
+#   custom_scripts: false
 # sync_conflict_resolver:                # sync conflict resolver ポリシー
 #   auto_approve_tools: false            # ツールの自動承認を許可（デフォルト: false）
 
@@ -185,12 +192,14 @@ dynamic parallel と `dynamic_facets` の selector は読み取り専用で、`R
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
 | `language` | `"en"` \| `"ja"` | `"en"` | UI 言語 |
+| `director.slack.channel_id` | string | - | director の Slack チャンネル。グローバル設定のみ。[Slack で director と会話する](#slack-で-director-と会話する)を参照。 |
+| `director.slack.allowed_user_ids` | string[] | - | Slack から director への発言を許可するユーザー。`director.slack` を設定するときは必須。空配列では誰の発言も受け付けない。 |
 | `logging.level` | `"debug"` \| `"info"` \| `"warn"` \| `"error"` | `"info"` | ログレベル |
 | `logging.trace` | boolean | `false` | trace レベルのログを有効化（高頻度のデバッグノイズを抑制） |
 | `logging.debug` | boolean | `false` | デバッグログを有効化（`debug.log` + `prompts.jsonl`） |
 | `logging.provider_events` | boolean | `false` | provider stream イベントを永続化 |
 | `logging.usage_events` | boolean | `false` | usage イベントログを永続化 |
-| `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-headless"` \| `"claude-terminal"` \| `"codex"` \| `"opencode"` \| `"deepseek-harness"` \| `"pi"` \| `"cursor"` \| `"copilot"` \| `"kiro"` \| `"mock"` | `"claude-sdk"` | デフォルトの具体 AI provider（`claude-sdk` = Agent SDK モード、`claude` = `claude-sdk` のエイリアス、`claude-headless` = ヘッドレス CLI モード、`claude-terminal` = experimental interactive terminal モード、`pi` = Pi SDK モード、`deepseek-harness` = 公式 DeepSeek Harness TypeScript SDK/runtime `0.2.1-alpha.2`） |
+| `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-headless"` \| `"claude-terminal"` \| `"codex"` \| `"opencode"` \| `"deepseek-harness"` \| `"pi"` \| `"cursor"` \| `"copilot"` \| `"kiro"` \| `"devin"` \| `"mock"` | `"claude-sdk"` | デフォルトの具体 AI provider（`claude-sdk` = Agent SDK モード、`claude` = `claude-sdk` のエイリアス、`claude-headless` = ヘッドレス CLI モード、`claude-terminal` = experimental interactive terminal モード、`pi` = Pi SDK モード、`deepseek-harness` = 公式 DeepSeek Harness TypeScript SDK/runtime `0.2.1-rc.5`） |
 | `model` | string | - | デフォルトモデル名（provider にそのまま渡される） |
 | `branch_name_strategy` | `"romaji"` \| `"ai"` | `"romaji"` | ブランチ名生成方式 |
 | `prevent_sleep` | boolean | `false` | macOS アイドルスリープ防止（caffeinate） |
@@ -199,11 +208,12 @@ dynamic parallel と `dynamic_facets` の selector は読み取り専用で、`R
 | `concurrency` | number (1-10) | `1` | `takt run` / `takt watch` の並列タスク数 |
 | `task_poll_interval_ms` | number (100-5000) | `500` | 新規タスクのポーリング間隔 (`takt run` / `takt watch`) |
 | `interactive_preview_steps` | number (0-10) | `3` | インタラクティブモードでの step プレビュー数 |
-| `assistant.formal_spec` | boolean \| `"Y/n"` \| `"y/N"` \| object | mode `"y/N"`、comments `true` | Alloy／Quint のガイダンスを追加し、要件を両方の記法でも表現します。object 形式では `mode`、`comments`、`model_check_timeout_seconds` を独立して指定できます。`comments: false` は自然言語の意味コメント指示だけを外し、形式仕様の量・要件網羅・構文と正確性の指示は維持します。`model_check_timeout_seconds` は `/verify` の `quint verify` と Alloy Analyzer に適用する上限秒数（1〜86,400 の整数、デフォルト 900）で、`parse`／`typecheck`／`run` の 60 秒は変わりません。project と global の object はフィールド単位で解決され、project が優先されます。`true` と `false` は質問せず使用します。TTY では `"Y/n"` と `"y/N"` を Yes／No の既定回答として会話セッションごとに1回質問し、非 TTY では標準入力を消費せず既定回答を採用します。Gherkin のガイダンスは開発・実装タスクにだけ適用されます。 |
+| `assistant.formal_spec` | boolean \| `"Y/n"` \| `"y/N"` \| object | mode `"y/N"`、comments `true` | Alloy／Quint のガイダンスを追加し、要件を両方の記法でも表現します。object 形式では `mode`、`comments`、`model_check_timeout_seconds` を独立して指定できます。`comments: false` は自然言語の意味コメント指示だけを外し、形式仕様の量・要件網羅・構文と正確性の指示は維持します。`model_check_timeout_seconds` は `/verify` の `quint verify` と Alloy Analyzer に適用する上限秒数（1〜86,400 の整数、デフォルト 900）で、`parse`／`typecheck`／`run` の 60 秒は変わりません。project と global の object はフィールド単位で解決され、project が優先されます。`true` と `false` は質問せず使用します。TTY では `"Y/n"` と `"y/N"` を Yes／No の既定回答として会話セッションごとに1回質問し、非 TTY では標準入力を消費せず既定回答を採用します。Gherkin のガイダンスは開発・実装タスクにだけ適用されます。 manager もこの設定を使い、質問せず `true`／`"Y/n"` では両記法を含め、`false`／`"y/N"` では含めません。TUI・Slack の manager の会話でも `/verify` を使えます。 |
 | `auto_requeue_max_attempts` | 非負整数 | `0` | `takt run` / `takt watch` 中に失敗した workflow task を自動 requeue する上限回数。`0` で無効 |
 | `ignore_exceed` | boolean | `false` | `takt run` / `takt watch` の iteration 上限無視を設定します。CLI で `--ignore-exceed` を指定した場合は CLI 指定が優先されます |
 | `sync_project_local_takt_on_retry` | boolean | `true` | 既存 worktree の再試行位置を選ぶ前、または SDK を確認する前にルートの project-local `.takt` を同期します。SDK 導入を断った場合や選択を中止した場合も同期済みのファイルは残ります。`false` では worktree 側のコピーを維持します。 |
 | `worktree_dir` | string | - | 共有クローンのディレクトリ（デフォルトは `../{clone-name}`） |
+| `manager.preserve_goal_worktree` | boolean | `false` | manager がゴールタスクの成果を取り込んだ後も worktree と run 証跡を保持します。[ゴールタスクの worktree 保持](#ゴールタスクの-worktree-保持)を参照。 |
 | `allow_git_hooks` | boolean | `false` | TAKT 管理の auto-commit 時に git hooks を許可 |
 | `allow_git_filters` | boolean | `false` | TAKT 管理の auto-commit 時に git filter を許可 |
 | `auto_pr` | boolean | - | worktree 実行後に PR を自動作成 |
@@ -232,6 +242,7 @@ dynamic parallel と `dynamic_facets` の selector は読み取り専用で、`R
 | `cursor_cli_path` | string | - | Cursor Agent CLI バイナリパス上書き（絶対パス） |
 | `copilot_cli_path` | string | - | Copilot CLI バイナリパス上書き（絶対パス） |
 | `kiro_cli_path` | string | - | Kiro CLI バイナリパス上書き（絶対パス） |
+| `devin_cli_path` | string | - | Devin CLI バイナリパス上書き（絶対パス） |
 | `enable_builtin_workflows` | boolean | `true` | ビルトイン workflow の有効化 |
 | `disabled_builtins` | string[] | `[]` | 無効化するビルトイン workflow（YAML の `name`） |
 | `pipeline` | object | - | pipeline テンプレート設定 |
@@ -248,6 +259,7 @@ dynamic parallel と `dynamic_facets` の selector は読み取り専用で、`R
 | `workflow_arpeggio` | object | すべて `false` | Arpeggio カスタムコードポリシー（`custom_data_source_modules`, `custom_merge_inline_js`, `custom_merge_files`） |
 | `workflow_runtime_prepare` | object | `{ custom_scripts: false }` | ランタイム prepare ポリシー（ビルトインプリセットは常に許可） |
 | `workflow_command_gates` | object | `{ custom_scripts: false }` | workflow YAML command quality gate ポリシー |
+| `workflow_system_commands` | object | `{ custom_scripts: false }` | workflow の system command input を許可するポリシー |
 | `workflow_overrides` | object | - | workflow レベルの上書き。トップレベル / step 単位 / persona 単位の `quality_gates`（AI ディレクティブまたは `type: command` ゲート）と `quality_gates_edit_only` |
 | `sync_conflict_resolver` | object | `{ auto_approve_tools: false }` | sync conflict resolver ポリシー |
 | `observability` | object | 無効 | OpenTelemetry foundation の opt-in 設定。`enabled` で SDK を初期化し、`monitor` は workflow metric を `.takt/runs/<run>/monitor.json` に出力し、`session_log_exporter` は span 由来の shadow session log を出力します。`usage_events_phase` は phase 粒度の usage events を `.takt/runs/<run>/logs/<session>-usage-events.phase.jsonl` に出力します。`enabled: true` と `OTEL_EXPORTER_OTLP_ENDPOINT` が揃うと、TAKT は標準の `OTEL_EXPORTER_OTLP_*` 環境変数で span と metric も OTLP 送信します。TAKT 独自の OTLP config キーはありません。 |
@@ -316,7 +328,7 @@ ignore_exceed: false          # takt run / takt watch で --ignore-exceed 相当
 #     - .takt/assistant-notes.md
 
 # provider 固有オプション（legacy のプロジェクト既定値。runtime モードでは runtime.yaml の profile が所有）
-# codex / claude / claude_terminal / cursor / copilot / kiro / pi も
+# codex / claude / claude_terminal / cursor / copilot / kiro / devin / pi も
 #   guards.call_timeout_ms（未指定時 60 分）を利用できます。
 # provider_options:
 #   codex:
@@ -337,6 +349,7 @@ ignore_exceed: false          # takt run / takt watch で --ignore-exceed 相当
 #       reasoning_byte_limit: 4194304
 #   kiro:
 #     agent: my-default-agent
+#     effort: medium
 #   pi:
 #     extensions: [npm:pi-fff]
 #     no_skills: true
@@ -393,7 +406,7 @@ Pi の認証には Pi SDK の credential store または provider 固有の環�
 
 ### provider の無応答時間と OpenCode の実行上限
 
-`guards.call_timeout_ms` は provider から応答や tool event が届かない時間の上限です。値は 60,000〜86,400,000 ms、既定は 3,600,000 ms（60分）です。event が届くたびに待機時間を数え直すため、実行全体を60分で打ち切る設定ではありません。`codex`、`opencode`、Claude 系、`cursor`、`copilot`、`kiro`、`pi` に適用されます。旧 `claude_terminal.timeout_ms` はこの設定がない場合に使われます。
+`guards.call_timeout_ms` は provider から応答や tool event が届かない時間の上限です。値は 60,000〜86,400,000 ms、既定は 3,600,000 ms（60分）です。event が届くたびに待機時間を数え直すため、実行全体を60分で打ち切る設定ではありません。`codex`、`opencode`、Claude 系、`cursor`、`copilot`、`kiro`、`devin`、`pi` に適用されます。旧 `claude_terminal.timeout_ms` はこの設定がない場合に使われます。
 
 OpenCode の `provider_options.opencode.guards.profile` は既定で `standard` です。`minimal` はヒューリスティックなループ検出を無効にしますが、時間と出力量の上限は維持します。model ごとに変更する場合は `model_profiles` を記述順に評価し、`*` をワイルドカードとして使えます。global と project で個々の guard 設定は統合されますが、`model_profiles` は優先度が高い map 全体に置き換わります。
 
@@ -407,7 +420,7 @@ OpenCode の `event_limit` は既定で 500,000、`text_byte_limit` は 1 MiB、
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-headless"` \| `"claude-terminal"` \| `"codex"` \| `"opencode"` \| `"deepseek-harness"` \| `"pi"` \| `"cursor"` \| `"copilot"` \| `"kiro"` \| `"mock"` | - | 具体 provider の上書き |
+| `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-headless"` \| `"claude-terminal"` \| `"codex"` \| `"opencode"` \| `"deepseek-harness"` \| `"pi"` \| `"cursor"` \| `"copilot"` \| `"kiro"` \| `"devin"` \| `"mock"` | - | 具体 provider の上書き |
 | `model` | string | - | モデル名の上書き（provider にそのまま渡される） |
 | `submodules` | `"all"` \| string[] | - | プロジェクト専用。共有クローンで初期化する submodule。`"all"` または明示パスリスト（ワイルドカード不可） |
 | `with_submodules` | boolean | - | プロジェクト専用。`submodules: "all"` 相当の旧 boolean 設定。`submodules` を推奨 |
@@ -421,7 +434,7 @@ OpenCode の `event_limit` は既定で 500,000、`text_byte_limit` は 1 MiB、
 | `ignore_exceed` | boolean | `false`（global 設定またはデフォルト由来） | `takt run` / `takt watch` の iteration 上限無視を設定します。CLI で `--ignore-exceed` を指定した場合は CLI 指定が優先されます |
 | `base_branch` | string | - | クローン作成のベースブランチ（グローバルを上書き、デフォルト: リモートのデフォルトブランチ） |
 | `assistant.init_files` | string[] | - | project config 専用のインタラクティブ assistant 初期コンテキストファイル。パスは project root 相対で指定します。絶対パス、project root 外へ解決されるパス、`.env*` / `.npmrc` / `.pypirc` / `.netrc` / `*.pem` / `*.key` / `.git/**` などの機密ファイルパターンは拒否されます。存在しないパス、ディレクトリ、読めないファイルは分かるエラーになります。最大16ファイルまで指定でき、1ファイルは256KiB、合計本文は1MiBまでです。未設定または空の場合、`CLAUDE.md`、`AGENT.md`、`AGENTS.md`、`TAKT.md` などは自動探索されません。assistant の provider/model だけを制御する `takt_providers.assistant` とは別設定です。 |
-| `assistant.formal_spec` | boolean \| `"Y/n"` \| `"y/N"` \| object | mode `"y/N"`、comments `true`（global 設定またはデフォルト由来） | 要件を Alloy／Quint の両方の記法でも表現するガイダンスを追加するプロジェクト上書きです。object 形式では `mode`、`comments`、`model_check_timeout_seconds` を独立して指定でき、未指定フィールドは global またはデフォルトへフォールバックします。`comments: false` は自然言語の意味コメント指示だけを外し、形式仕様の量・要件網羅・構文と正確性の指示は維持します。`"Y/n"`／`"y/N"` への回答はセッション内だけで保持し、会話の再開時には改めて解決します。ACP と非 TTY では質問せず設定の既定回答を採用します。Gherkin のガイダンスは開発・実装タスクにだけ適用されます。廃止済みの `assistant.gherkin` は警告後に無視され、変換・永続化・ファイル更新は行いません。 |
+| `assistant.formal_spec` | boolean \| `"Y/n"` \| `"y/N"` \| object | mode `"y/N"`、comments `true`（global 設定またはデフォルト由来） | 要件を Alloy／Quint の両方の記法でも表現するガイダンスを追加するプロジェクト上書きです。object 形式では `mode`、`comments`、`model_check_timeout_seconds` を独立して指定でき、未指定フィールドは global またはデフォルトへフォールバックします。`comments: false` は自然言語の意味コメント指示だけを外し、形式仕様の量・要件網羅・構文と正確性の指示は維持します。`"Y/n"`／`"y/N"` への回答はセッション内だけで保持し、会話の再開時には改めて解決します。ACP と非 TTY では質問せず設定の既定回答を採用します。Gherkin のガイダンスは開発・実装タスクにだけ適用されます。廃止済みの `assistant.gherkin` は警告後に無視され、変換・永続化・ファイル更新は行いません。 manager もこの設定を使い、質問せず `true`／`"Y/n"` では両記法を含め、`false`／`"y/N"` では含めません。TUI・Slack の manager の会話でも `/verify` を使えます。 |
 | `provider_options` | object | - | provider 固有オプション |
 | `provider_profiles` | object | - | provider 固有のパーミッションプロファイル |
 | `vcs_provider` | `"github"` \| `"gitlab"` | 自動検出 | VCS プロバイダー（グローバルを上書き） |
@@ -430,6 +443,7 @@ OpenCode の `event_limit` は既定で 500,000、`text_byte_limit` は 1 MiB、
 | `workflow_arpeggio` | object | - | Arpeggio カスタムコードポリシー（グローバルを上書き） |
 | `workflow_runtime_prepare` | object | - | ランタイム prepare ポリシー（グローバルを上書き） |
 | `workflow_command_gates` | object | - | workflow YAML command quality gate ポリシー（グローバルを上書き） |
+| `workflow_system_commands` | object | - | workflow の system command input を許可するポリシー |
 | `sync_conflict_resolver` | object | - | sync conflict resolver ポリシー（グローバルを上書き） |
 | `observability` | object | - | プロジェクトレベルの OpenTelemetry opt-in 上書き。`enabled` で SDK を初期化し、`monitor` は workflow metric を `.takt/runs/<run>/monitor.json` に出力し、`session_log_exporter` は span 由来の shadow session log を出力します。`usage_events_phase` は phase 粒度の usage events を `.takt/runs/<run>/logs/<session>-usage-events.phase.jsonl` に出力します。`enabled: true` と `OTEL_EXPORTER_OTLP_ENDPOINT` が揃うと、TAKT は標準の `OTEL_EXPORTER_OTLP_*` 環境変数で span と metric も OTLP 送信します。TAKT 独自の OTLP config キーはありません。 |
 
@@ -475,26 +489,200 @@ TAKT_ALLOY_CONCURRENCY=1 TAKT_ALLOY_HEAP=2g TAKT_ALLOY_STACK=128m takt
 
 保持マーカーの書き込みに失敗した場合は所有権マーカーを保持マーカーへ移動し、保存先と書き込みエラーを通知します。移動にも失敗した場合は所有権マーカーを残し、保持を確定できない旨と保存先、両方のエラーを通知します。残った所有権マーカーは所有するNodeプロセスの終了後もディレクトリを自動掃除から保護します。必要な成果物を手動で退避してください。
 
+## workflow の system command input を許可するポリシー
+
+既定は無効です。projectの明示値（`false`を含む）はglobalより優先されます。projectで未指定の場合はglobalの値を使います。未許可のcommand inputを含むworkflowは読み込み時にエラーになります。`workflow_command_gates.custom_scripts`とは独立しています。
+
+```yaml
+workflow_system_commands:
+  custom_scripts: true
+```
+
+`TAKT_WORKFLOW_SYSTEM_COMMANDS_CUSTOM_SCRIPTS=true`
+
+この環境変数はprojectとglobalの設定より優先され、`false`の場合はprojectが`true`でも許可されません。
+
+別cloneでの実行にも元のproject設定を使います。各実行で許可を解決し、rootと子workflowへ同じ値を渡します。`wait`中は再解決しません。
+
+pipeline または対話モードが現在のディレクトリに PR をチェックアウトする場合は、切り替え前の設定から許可を決めます。対話セッションでは Issue に切り替えた後も同じディレクトリでこの許可を使います。PR が追加した project 設定だけでは許可されません。
+
 ## 環境変数上書き
 
 ほとんどの設定キーは `TAKT_` に設定キーパスをアンダースコア区切り・大文字化して続けた環境変数で上書きできます。`logging.debug` は `TAKT_LOGGING_DEBUG`、`telemetry.routing_decisions` は `TAKT_TELEMETRY_ROUTING_DECISIONS` になります。よく使う例: `TAKT_PROVIDER`、`TAKT_MODEL`、`TAKT_CONCURRENCY`、`TAKT_LOGGING_DEBUG`、`TAKT_TELEMETRY_ROUTING_DECISIONS`、`TAKT_OBSERVABILITY_ENABLED`。環境変数の値は対応するファイルの値を上書きし、キーを持つ層で適用されます。グローバル専用キー（例: `logging`、`disabled_builtins`）はグローバル `~/.takt/config.yaml` 層で、プロジェクト上書き可能キー（例: `concurrency`、`telemetry.routing_decisions`）はプロジェクト `.takt/config.yaml` 層でも解決されます。
 
 設定キー上書きとは別に、`TAKT_NOTIFY_WEBHOOK` には Slack Incoming Webhook URL を設定できます。設定すると、pipeline 完了時と `takt run` のタスクバッチ完了時（run summary）に Slack へ通知が送信されます。manager の有効なゴール通知にも同じ Webhook を使用します。
 
-## manager の秘密ファイル設定
+## ゴール PR の仕上げ
 
-グローバル `~/.takt/config.yaml` またはプロジェクト `.takt/config.yaml` の `manager.sensitive_paths` で、担当リポジトリ内でも判断役へ渡すファイルとディレクトリを追加できます。
+`manager.main_merge` はプロジェクトの `.takt/config.yaml` で `approve`（既定）または `auto` を指定します。どちらも完成申請で PR を作成します。`approve` は manager が `takt_merge_goal_pr` の `until: prepare` で仕上げて人のマージを待ち、`auto` は `until: merge` でマージまで進めます。人の明示的なマージ指示も `until: merge` を使います。手元への直接マージや、PR 作成失敗の時間・回数による自動再試行は行いません。
+
+`until: prepare` は `merge.prepare_workflow`（未設定なら `merge-prepare`）を使います。`until: merge` は `merge.workflow`（未設定なら `merge-review-fix-simple`）を使い、manager はワークフロー名を指定しません。`merge.prepare_workflow` はこの manager の操作だけに適用され、`takt merge` の workflow 選択は変わりません。`merge.auto_start` は通常タスクの PR 公開後の起動を制御し、ゴール PR は manager が明示的にタスクを積みます。
+
+## ゴールタスクの worktree 保持
+
+プロジェクトの `.takt/config.yaml` またはグローバルの `~/.takt/config.yaml` で `manager.preserve_goal_worktree: true` を指定すると、manager が `takt_merge_goal_task` でゴールタスクの成果を正常に取り込んだ後も worktree を保持します。project の値が global より優先されます。確認済みの成果が既に取り込み済みだった場合と、その操作で新たにマージした場合の両方に適用されます。
 
 ```yaml
 manager:
-  sensitive_paths:
-    - private
-    - config/credentials.json
+  preserve_goal_worktree: true
 ```
 
-既定は `.env`、`.env.*`、`id_rsa`、`id_dsa`、`id_ecdsa`、`id_ed25519`、`*.key`、`*.pem`、`*.crt`、`*.cer`、`*.p12`、`*.pfx` です。両設定の一覧を既定に追加し、省略や空配列でも既定を削除できません。単独の名前は任意の深さで適用し、ディレクトリ成分を含む相対パスは各担当リポジトリを基準にします。絶対パスと `~/` も指定できます。ディレクトリ指定は配下を含みます。名前には先頭または末尾の単一の `*` を使えます。許可ルールを定義する設定ではありません。
+worktree、clone metadata、worktree 内の `.takt/runs` の reports・logs はそのまま残ります。completed タスク記録も従来どおり残し、タスク履歴の自動削除は行いません。既定の `false` では、従来の worktree・clone metadata の cleanup と `cleanupWarning` の挙動を維持します。この設定は、通常の `completeTask`、List Tasks からの手動 merge・delete、PR merge タスク、未取り込みタスクには影響しません。
 
-Claude の `Read`、`Glob`、`Grep` は、パスとシンボリックリンクを解決した対象が担当内の読み取り可能な通常対象だけの場合に判断役を通りません。検索候補は秘密の本文を読まず、パスとメタデータで確認します。検索指定は `*`、`**`、`?` の単純な形式に対応し、除外、波括弧展開、文字クラス、エスケープや範囲を確定できない指定は判断役へ渡します。隠しパス、走査するディレクトリやリンクは保守的に確認するため、絞り込んだ検索でも審査する場合があります。Codex の組み込み道具は引き続き審査します。
+## manager がタスクに使う workflow
+
+グローバルの `~/.takt/config.yaml` またはプロジェクトの `.takt/config.yaml` の `manager.workflows` で、新しい開発タスクに使える workflow を指定します。project の値は global の一覧全体を置き換えます。各要素は名前の文字列か、`{ 名前: 使い分けの説明 }` の1対だけを持つオブジェクトです。`workflow_categories.workflows` と同じ記法です。
+
+```yaml
+manager:
+  workflows:
+    - default: 普通の機能追加や不具合の修正。計画からレビューまで一通り行う
+    - simple: 1〜2 ファイルで済む小さな修正。軽い流れで進める
+    - takt-default
+```
+
+`manager.workflows` が project と global のどちらにも設定されていない場合、候補は `default` と `simple` です。manager は `language` に合わせた上記の使い分けの説明を受け取り、タスクに合う workflow を選択します。名前だけを明示した要素には説明を補いません。`workflows: all` なら従来どおり制限しません。見つからない名前は manager の会話の plan を作るときに警告して無視します。空の名前や複数キーのオブジェクトなど、不正な形は設定読み込み時にエラーになります。
+
+manager の `takt_list_workflows` は選べる候補だけを返し、workflow 自身の `description` に加えて、設定した使い分けの説明を `usageDescription` で返します。`takt_enqueue_goal_task` で選べない workflow を新規登録すると、道具が候補一覧と設定ファイルの場所を示すエラーで断ります。既存タスクの再開・積み直し・やり直しは、保存済みの workflow のまま可能です。`takt_merge_goal_pr` による PR の仕上げ（`merge.prepare_workflow` / `merge.workflow`）、子の `workflow_call`、manager 以外の MCP、人が手で使う CLI には制限しません。workspace manager は、一覧取得・タスク投入の対象リポジトリごとの設定を使います。
+
+## manager のツール権限
+
+プロジェクトの `.takt/config.yaml` またはグローバルの `~/.takt/config.yaml` に設定します。
+
+```yaml
+manager:
+  permission: full
+  provider_permissions:
+    claude: auto
+```
+
+`manager.permission` は `auto`（既定）または `full` を指定します。
+`manager.provider_permissions` はプロバイダ名から同じ値への対応表で、既定は空です。
+この例では Claude だけ AI による権限審査を使い、他は全権限で実行します。
+
+解決順は project の該当プロバイダ設定 → global の該当プロバイダ設定 → project の
+`permission` → global の `permission` → `auto` です。manager のターンで実際に解決された
+プロバイダ名を使います。`claude` と `claude-sdk` は同一視し、同じ階層に両方あれば実際の
+プロバイダ名と一致するキーを優先します。リポジトリ担当はそのリポジトリの設定を使います。
+workspace 担当は登録済みリポジトリの先頭、未登録なら workspace 専用ディレクトリの設定を
+使い、`auto_run` など既存の manager 設定と同じ規則で解決します。
+
+- **Claude（`claude` / `claude-sdk`）**: `auto` は SDK の `permissionMode: auto` を使い、
+  権限チェックを迂回しません。分類器がツール呼び出しを許可・拒否します。
+  `full` は従来どおり `bypassPermissions` です。
+- **Codex**: `auto` は `workspace-write`、`approvalPolicy: on-request`、
+  `approvals_reviewer = "auto_review"` を使います。`gh` などのためネットワークを有効にし、
+  権限拡張の要求を AI が審査します。人がいない実行でも承認できます。
+  `full` は従来どおり `danger-full-access` と `approvalPolicy: never` です。
+- **その他のプロバイダ**: この AI 審査の仕組みがないため、`auto` も `full` と同じ動作です。
+
+manager の MCP ツールは既存の承認許可リストを維持し、どちらのモードでも確認なしで使えます。
+AI 審査が拒否した操作は、ツール結果として manager に返ります。TAKT が拒否から人への質問を
+機械的に作ることはありません。対象は manager のターンだけで、workflow の step や run の
+権限は変更しません。
+
+## Slack で manager と会話する
+
+会話スレッドに `/make-goal` を送ると登録案が表示されます。「登録する」または「登録せずに会話に戻る」で操作でき、古い版のボタンは使えません。
+
+Slack の Socket Mode を使うと、公開 URL を用意せずに manager と会話できます。会話の返事と問い合わせへの回答には、以下の Slack App を使います。「完成しました」などの通知は、引き続き `TAKT_NOTIFY_WEBHOOK` に設定した Incoming Webhook で届きます。会話と通知は併用できます。
+
+### Slack App を作る
+
+1. Slack の App 作成画面で **From an app manifest** を選び、ワークスペースを指定して次の YAML を貼り付けます。
+
+   ```yaml
+   display_information:
+     name: TAKT manager
+   features:
+     bot_user:
+       display_name: TAKT manager
+       always_online: true
+   oauth_config:
+     scopes:
+       bot:
+         - chat:write
+         - channels:history
+         - groups:history
+   settings:
+     event_subscriptions:
+       bot_events:
+         - message.channels
+         - message.groups
+     interactivity:
+       is_enabled: true
+     socket_mode_enabled: true
+   ```
+
+2. App をワークスペースにインストールし、**OAuth & Permissions** でボット用トークン（`xoxb-…`）をコピーします。
+3. **Basic Information → App-Level Tokens** で、スコープ `connections:write` を付けた App-Level Token を作り、コピーします（`xapp-…`）。
+4. 会話するチャンネルで `/invite @TAKT manager` を実行し、ボットを招待します。
+5. Slack のチャンネル詳細でチャンネル ID を確認します。許可する各ユーザーのプロフィールから「メンバー ID をコピー」を選び、ユーザー ID を取得します。
+
+### 設定して起動する
+
+リポジトリの `.takt/config.yaml` に、会話する1つのチャンネルと、発言・ボタン操作を受け付ける Slack ユーザーを指定します。
+
+```yaml
+manager:
+  slack:
+    channel_id: C0123ABCD
+    allowed_user_ids: [U0AAAAAA]
+```
+
+`manager.slack` はリポジトリ専用で、グローバルの `~/.takt/config.yaml` には書けません。トークンを `manager.slack` に書くと設定の検証で拒否されます。
+
+リポジトリの `.takt/config.yaml` は、バージョン管理され、共有される場合があります。`manager.slack.allowed_user_ids` を変更すると、Slack から manager に入力できるユーザーが変わります。daemon を起動する前にリポジトリ設定の変更を確認し、信頼できる設定を使ってください。
+
+Slack 設定と登録済みリポジトリの一覧は daemon の起動時に読み込まれます。許可ユーザーの削除を含む変更を反映するには、`takt daemon stop` を実行してから daemon を起動し直してください。
+
+daemon を起動するシェルで2つのトークンを環境変数に設定し、`takt manager` または `takt daemon` で起動します。たとえば次のように実行します。
+
+```bash
+export TAKT_SLACK_APP_TOKEN='xapp-...'
+export TAKT_SLACK_BOT_TOKEN='xoxb-...'
+takt manager
+```
+
+`TAKT_SLACK_APP_TOKEN` は `connections:write` を持つ App-Level Token、`TAKT_SLACK_BOT_TOKEN` はボット用トークンです。daemon は読み取った後に両変数を自身の環境から削除し、provider やツールの子プロセスに渡らないようにします。`takt manager`・`takt director` は必要に応じて専用の daemon を起動します。トークンや Slack 設定を変更した場合は、`takt daemon stop` で停止してから起動し直してください。
+
+daemon は仕事や Slack 接続の有無にかかわらず常駐し、`takt daemon stop` またはシグナルで停止します。Slack の設定やトークンがない場合も TUI の受付と監視を続けます。同じチャンネルを2つのリポジトリが設定すると、両方の Slack を無効にします。起動・停止・診断は `~/.takt/daemon-logs/*.json` に非同期で保存します。
+
+### 会話と問い合わせへの回答
+
+待機中の入力は再起動後も残ります。daemon の停止・再起動で中断した人以外のイベントは、元の受付順で届け直します。人が明示的に中断したターンは届け直さず、人の発言の中断は従来どおり次の発言へ引き継ぎます。現在の Slack ポートは再起動後の返信先の復元を保証しません。
+
+Slack への ACK は通信上の受信確認です。業務上の accepted は、daemon が入力を永続化してから返します。結果はあとから元のスレッドへ届きます。
+
+- 設定したチャンネルに投稿すると、その投稿のスレッドに返事が届きます。以後はそのスレッドで会話を続けてください。どの会話スレッドも、そのリポジトリの manager の同じ会話につながり、TUI とも共有します。返事は発言したスレッドにだけ届き、TUI での発言への返事は Slack に出ません。
+- 別のチャンネル、ボットへの DM、`allowed_user_ids` にない人の発言やボタン操作には反応しません。
+- daemon はイベントで動きます。キューは人の入力と、それ以外のイベントの2本です。次のターンでは人の入力を先に処理し、各キューでは受け付けた順を守ります。会話は1本で、イベントで知った内容も次の人との会話に引き継ぎます。処理中でも発言・承認・問い合わせ回答を保存して受け付け、画面の読み出しと現在のターンの中断を行えます。accepted は永続化済みの受付で、処理の完了ではありません。中断しても待機中の入力は消えません。失敗や中断のあとは、manager が現在の状態と副作用を確かめ、再開・修正してのやり直し・新しい作業を判断します。
+- 問い合わせ（質問・操作依頼）は設定チャンネルへ届きます。選択肢や実施結果はボタン、自由記述はスレッドの返信で回答し、出所 `slack` を保存します。許可範囲の選択・許可文の保存は廃止しました。
+- 自由記述の回答は、その問い合わせの投稿のスレッドに返信します。投稿と問い合わせの対応が有効な場合、返信は会話ではなく回答として扱われます。回答は出どころ `slack` として保存されます。
+- 問い合わせの変更は見張りのイベントから届きます。Slack 側は全件を定期走査しません。接続前の問い合わせは TUI の `Ctrl+R` で回答できます。投稿と問い合わせの対応が読めない場合は返信を受け付けず、通常の会話へ送り直すこともしません。
+- 「完成しました」などの知らせは、会話の接続からは投稿しません。引き続き `TAKT_NOTIFY_WEBHOOK` で届きます。
+
+## Slack で director と会話する
+
+director のチャンネルと許可するユーザーは、プロジェクトの `.takt/config.yaml` ではなく、グローバルの `~/.takt/config.yaml` に設定します。
+
+```yaml
+# ~/.takt/config.yaml
+director:
+  slack:
+    channel_id: C0DIR
+    allowed_user_ids: [U0AAA]
+```
+
+manager と同じ Slack App と環境変数 `TAKT_SLACK_APP_TOKEN` / `TAKT_SLACK_BOT_TOKEN` を使います。[Slack App を作る](#slack-app-を作る)に従ってボットを director のチャンネルへ招待し、`takt daemon` を起動するシェルで両変数を設定してください。トークンは設定ファイルに書かず、環境変数で渡します。Slack 設定を変更したら daemon を起動し直してください。
+
+director のチャンネルに許可された人が書いた発言は、manager ではなく director の会話に渡ります。director の返事は元の投稿のスレッドに届きます。`director.slack.allowed_user_ids` にない人の発言は無視します。manager と同じチャンネルを使う場合も、通常の発言は director に渡り、manager の問い合わせボタンの操作には `manager.slack.allowed_user_ids` が適用されます。
+
+director は、1回のターンで出た新しい知らせを、このチャンネルへの1件の投稿にまとめます。終わった仕事と、マージ承認や未回答の問い合わせなど人に決めてほしいことを知らせます。既存の重複抑止で除かれた知らせは再投稿しません。`director.slack` がなければ、director は Slack に投稿せず、発言も受け付けません。接続には両方のトークン環境変数が必要です。既存の `TAKT_NOTIFY_WEBHOOK` による通知経路は変わりません。
+
+## manager の秘密ファイル設定
+
+`manager.sensitive_paths` と `provider.targets.internal_agents.manager-permission-judge` は非推奨で、読み飛ばします。既存の設定ファイルでも起動できますが、ファイル保護や道具の実行可否への効果はありません。人の指示と秘密値の扱いは manager のファセットに従い、許可 Markdown は読みません。
 
 ## manager の通知設定
 
@@ -532,7 +720,7 @@ manager:
 
 ## API キー設定
 
-TAKT は Claude、Codex、OpenCode、Pi、公式 DeepSeek Harness SDK、Cursor、Copilot、Kiro provider をサポートしています。Claude/Codex/OpenCode は各 SDK の認証情報、Pi は Pi SDK の credential store または provider 環境変数、DeepSeek Harness は公式store（`$DSH_HOME/.credentials.yaml`、既定 `~/.dsh/.credentials.yaml`）または `DEEPSEEK_API_KEY` 環境変数、Kiro は API キーを使い、Cursor は API キーまたは `cursor-agent login` セッションで認証でき、Copilot は GitHub トークンを使います。
+TAKT は Claude、Codex、OpenCode、Pi、公式 DeepSeek Harness SDK、Cursor、Copilot、Kiro、Devin provider をサポートしています。Claude/Codex/OpenCode は各 SDK の認証情報、Pi は Pi SDK の credential store または provider 環境変数、DeepSeek Harness は公式store（`$DSH_HOME/.credentials.yaml`、既定 `~/.dsh/.credentials.yaml`）または `DEEPSEEK_API_KEY` 環境変数、Kiro は API キーを使い、Cursor は API キーまたは `cursor-agent login` セッションで認証でき、Copilot は GitHub トークンを使います。
 
 グローバル設定 schema には現在トップレベル provider として選択できない一部の legacy または provider integration 用 API key フィールドも残っています。これらのフィールドだけでは provider は有効になりません。選択した provider について、以下に記載した認証用の環境変数または設定キーを使用してください。
 
@@ -591,6 +779,7 @@ kiro_api_key: ...              # Kiro CLI 用
 | Cursor Agent | `TAKT_CURSOR_API_KEY` | `cursor_api_key` |
 | GitHub Copilot CLI | `TAKT_COPILOT_GITHUB_TOKEN` | `copilot_github_token` |
 | Kiro CLI | `TAKT_KIRO_API_KEY`（`KIRO_API_KEY` フォールバック） | `kiro_api_key` |
+| Devin CLI | `devin auth login` のクレデンシャルストア | - |
 
 ### セキュリティ
 
@@ -602,6 +791,7 @@ kiro_api_key: ...              # Kiro CLI 用
 - DeepSeek credential は公式 runtime に渡します。TAKT は保存済み credential 値を読みません。
 - Copilot provider は `copilot` CLI のインストールが必要です。GitHub トークンは認証に使用されます。
 - Kiro provider は `kiro-cli` CLI のインストールが必要です。`TAKT_KIRO_API_KEY` / `kiro_api_key` は子プロセスの `KIRO_API_KEY` として渡されます。どちらも未設定の場合は公式の `KIRO_API_KEY` 環境変数を使用します。
+- Devin provider は `devin` CLI のインストールと `devin auth login` による認証が必要です。TAKT は子プロセスにクレデンシャルを渡しませんが、例外として `WINDSURF_API_KEY` が設定されている場合はその値を子プロセスの環境へ引き継ぎます。
 
 ### CLI パス上書き
 
@@ -613,6 +803,7 @@ export TAKT_CODEX_CLI_PATH=/usr/local/bin/codex
 export TAKT_CURSOR_CLI_PATH=/usr/local/bin/cursor-agent
 export TAKT_COPILOT_CLI_PATH=/usr/local/bin/github-copilot-cli
 export TAKT_KIRO_CLI_PATH=/usr/local/bin/kiro-cli
+export TAKT_DEVIN_CLI_PATH=/usr/local/bin/devin
 ```
 
 ```yaml
@@ -622,6 +813,7 @@ codex_cli_path: /usr/local/bin/codex
 cursor_cli_path: /usr/local/bin/cursor-agent
 copilot_cli_path: /usr/local/bin/github-copilot-cli
 kiro_cli_path: /usr/local/bin/kiro-cli
+devin_cli_path: /usr/local/bin/devin
 ```
 
 | Provider | 環境変数 | 設定キー |
@@ -631,6 +823,7 @@ kiro_cli_path: /usr/local/bin/kiro-cli
 | Cursor Agent | `TAKT_CURSOR_CLI_PATH` | `cursor_cli_path` |
 | Copilot | `TAKT_COPILOT_CLI_PATH` | `copilot_cli_path` |
 | Kiro CLI | `TAKT_KIRO_CLI_PATH` | `kiro_cli_path` |
+| Devin CLI | `TAKT_DEVIN_CLI_PATH` | `devin_cli_path` |
 
 パスは実行可能ファイルの絶対パスである必要があります。環境変数は設定ファイルの値よりも優先されます。CLI パス上書きはグローバル専用の設定値です。プロジェクトレベルの `.takt/config.yaml` ではなく、`~/.takt/config.yaml` または対応する環境変数で設定してください。
 
@@ -656,6 +849,8 @@ workflow の `promotion` entry は `runtime.yaml` で選択された target ladd
 
 **Kiro CLI** は `model` を `kiro-cli chat --model <model>` にそのまま渡します。省略時は Kiro CLI のデフォルトが使用されます。
 
+**Devin CLI** は `model` を `devin acp --model <model>` に渡します（例: `swe-2-max`、`swe-2-high`、`swe-2-medium`）。ACP session はその名前を `model` と `thought_level` の config option に解決し、解決・適用できない名前はデフォルトへフォールバックせずエラーになります。この検証は新規 session のみに適用され、再開 session は作成時のモデルを維持するため、指定された名前の再解決は行いません。省略時はユーザーの Devin config に設定されたデフォルトモデルが使用されます。
+
 ### 設定例
 
 ```yaml
@@ -666,7 +861,7 @@ model: opus     # すべての step のデフォルトモデル（上書きさ�
 
 ### OpenCode v1/v2 の選択
 
-OpenCode provider は外部 `opencode` CLI の `serve` を起動し、SDK で専用サーバーへ接続します。API キーだけでは実行できません。既定は v2 で、`@opencode/client` と `@opencode/plugin` 2.0.18 を使います。明示的に v1 を選ぶ場合は `@opencode-ai/sdk` 1.18.28 を使います。検証済み CLI は v1 1.18.2 と v2 2.0.18 です。最低対応版を保証する記載ではありません。選択した世代と CLI の major version が一致しない場合はサーバー起動前にエラーにします。v1 CLI だけを導入している環境では v1 の明示選択が必要です。OpenCode v2 は同名の `opencode` を置き換えるため、自動判定や自動更新は行いません。
+OpenCode provider は外部 `opencode` CLI の `serve` を起動し、SDK で専用サーバーへ接続します。API キーだけでは実行できません。既定は v2 で、`@opencode/client` と `@opencode/plugin` 2.2.5 を使います。明示的に v1 を選ぶ場合は `@opencode-ai/sdk` 1.18.28 を使います。検証済み CLI は v1 1.18.2 と v2 2.0.18 で、client/plugin 2.2.5 と v2 CLI 2.0.18 の組み合わせによるサーバー起動と基本的な prompt/tool 呼び出しを確認しています。最低対応版を保証する記載ではありません。選択した世代と CLI の major version が一致しない場合はサーバー起動前にエラーにします。v1 CLI だけを導入している環境では v1 の明示選択が必要です。OpenCode v2 は同名の `opencode` を置き換えるため、自動判定や自動更新は行いません。
 
 ```sh
 # 既存 CLI を更新せず v2 を隔離して導入
@@ -845,8 +1040,6 @@ provider:
         profile: router
       review-completion-judge:
         profile: router
-      manager-permission-judge:
-        profile: router
 
   auto_routing:
     strategy: balanced
@@ -867,16 +1060,23 @@ provider:
 
 `provider.assignments` には起動ディレクトリや `--runtime-assignment <name>` で選択する名前付きの provider 設定セットを定義できます。
 各 entry は `defaults` または `targets` の少なくとも一方を持つ必要があり、空の assignment は指定できません。
-`defaults` はトップレベルの `provider.defaults` と同じく `profile` または `ladder` の一方を指定します。
+assignment 内の `defaults` は `profile` または `ladder` の一方を指定し、別の assignment は参照できません。
 `targets` はトップレベルの `provider.targets` と同じ形で、`personas`、`tags`、`steps` は
 `profile`、`pool`、`ladder` のいずれか、`internal_agents` は `profile` または `ladder`、
 `companions` は固定 `profile` を指定できます。
 
+`provider.defaults: { assignment: project-sol }` で既定の assignment を選択できます。
+トップレベルの `defaults` は `profile`、`ladder`、`assignment` のいずれか一つを指定します。
+選択の優先順位は CLI、ディレクトリの一致、既定 assignment の順です。project の `defaults` は global の値を丸ごと置き換えます。
+未知の assignment や profile、空または複数指定の defaults は agent 起動前にエラーになります。
+トップレベルが assignment を指定し、選択先に具体的な defaults がない場合もエラーになります。
+トップレベルが profile または ladder の場合は、assignment の defaults を省略するとその値を引き継ぎます。
+
 `provider.directories` はディレクトリパスから assignment 名への map です。照合対象は起動時の project
 ディレクトリで、キーは `~` を展開して絶対パス化した後、存在するパスについて realpath 相当に正規化して
 完全一致で照合します。前方一致や glob は使いません。値の assignment 名が未定義の場合は読み込み時に
-fail-fast します。ディレクトリが一致すると、assignment の `defaults`（省略時はトップレベルの
-`provider.defaults`）を使用し、assignment に `targets` がある場合はトップレベルの `provider.targets` 全体を
+fail-fast します。ディレクトリが一致すると assignment の `defaults` を使用し、省略時はトップレベルの
+profile または ladder を使用します。assignment に `targets` がある場合はトップレベルの `provider.targets` 全体を
 置き換えます。`personas` だけを残すような map 単位のマージは行いません。`targets` を省略した assignment
 はトップレベルの `provider.targets` をそのまま引き継ぎます。`profiles` と `auto_routing` は共有されたままです。
 
@@ -907,8 +1107,8 @@ global と project のレイヤーで `assignments` が定義されている場�
 
 `--runtime-assignment <name>` は global と project の runtime.yaml を合成した後の
 `provider.assignments` から名前を選びます。`provider.directories` の一致より CLI 指定が優先します。
-assignment は合成直後のトップレベルへ1回だけ適用します。`defaults` と `targets` は省略すると
-トップレベルの値を継承し、`targets` を指定すると map 全体を置き換えます。
+assignment は合成直後のトップレベルへ1回だけ適用します。`defaults` を省略するとトップレベルの profile または ladder を継承し、
+`targets` を省略するとトップレベルの値を継承します。`targets` を指定すると map 全体を置き換えます。
 `profiles`、`auto_routing`、`mcp`、`companion`、`loop_analysis` は共通のままです。
 既存の `--provider`、`--model`、`--auto-strategy` override は選択後の設定より優先します。
 
@@ -985,7 +1185,7 @@ provider:
 
 内部 agent の権限を制限する場合は、`capabilities` または `permission_mode` を指定した profile を割り当ててください。未指定なら provider の通常設定が使われます。
 
-有効な provider section では `provider.defaults` の指定が必須で、固定の `profile` または順序付きの `ladder` のいずれか一方だけを指定します。`pool` は指定できません。`provider.targets.personas`、`provider.targets.tags`、`provider.targets.steps` のエントリは、固定の `profile`、順序付きの `ladder`、または auto routing 用の `pool` のいずれか一方を指定できます。`pool` はこれらの明示的な workflow target に限り指定できます。`internal_agents` のエントリは固定の `profile` または順序付きの `ladder` を指定できますが、`pool` は指定できません。`companions` のエントリは固定の `profile` のみ指定でき、`pool` と `ladder` は指定できません。step は `<leaf-workflow-name>/<step-name>` 形式で指定し、agent を起動しない制御ノード（`workflow_call` など）は解決対象になりません。
+有効な provider section では `provider.defaults` の指定が必須で、固定の `profile`、順序付きの `ladder`、名前付きの `assignment` のいずれか一つを指定します。`pool` は指定できません。`provider.targets.personas`、`provider.targets.tags`、`provider.targets.steps` のエントリは、固定の `profile`、順序付きの `ladder`、または auto routing 用の `pool` のいずれか一方を指定できます。`pool` はこれらの明示的な workflow target に限り指定できます。`internal_agents` のエントリは固定の `profile` または順序付きの `ladder` を指定できますが、`pool` は指定できません。`companions` のエントリは固定の `profile` のみ指定でき、`pool` と `ladder` は指定できません。step は `<leaf-workflow-name>/<step-name>` 形式で指定し、agent を起動しない制御ノード（`workflow_call` など）は解決対象になりません。
 
 自動ルーティングを使う target には `pool` を指定してください。指定しない target と workflow 外の処理には `provider.defaults` が使われます。`fallback_profile` は選択した pool の中で使われます。
 
@@ -1000,7 +1200,7 @@ defaults
   < steps
 ```
 
-内部 agent（`selector`、`assistant`、`loop-judge`、`review-completion-judge`、`manager-permission-judge`）は別のラダーで解決します。`selector` は動的な作業選択、`assistant` は対話セッション、`loop-judge` は loop monitor の判定、`review-completion-judge` は opt-in した reviewer に再確認が必要かの判定を担当します。`manager-permission-judge` は、provider が claude（claude-sdk）または codex の manager 会話で、道具の実行前審査を担当します。判断役の provider と model は `runtime.yaml` の `provider.targets.internal_agents.manager-permission-judge` で指定し、`profile` または `ladder` を使います。`pool` は指定できません。seat はすべて任意で、未指定なら通常の既定解決を使います。ただし、`manager-permission-judge` は未指定なら manager と同じ provider・model・provider options を使います。
+内部 agent（`selector`、`assistant`、`loop-judge`、`review-completion-judge`）は独立した解決順序を使います。`selector` は動的な作業選択、`assistant` は対話セッション、`loop-judge` は loop monitor の判定、`review-completion-judge` は opt-in した reviewer に再確認が必要かの判定を担当します。各 seat は省略可能で、未指定なら通常の既定解決を使います。廃止した `manager-permission-judge` は読み飛ばします。
 
 ```text
 defaults
@@ -1092,6 +1292,26 @@ mcp:
 
 ### スキーマ
 
+通常モードと grill-me モードの両方のアシスタント会話には `mcp.targets.personas.assistant` を使います。
+MCP に対応する provider では、アシスタントに内蔵の読み取り専用 `takt` server も付きます。
+`takt` という名前で利用者が定義した server はアシスタントに渡されず、内蔵の `takt` server が使われます。
+この場合、通知は出ません。
+MCP に対応しない provider では、MCP を使わずに会話を続け、その旨を通知します。
+例えば、設定済みの Backlog MCP server は次のように割り当てます。
+
+```yaml
+version: 1
+mcp:
+  servers:
+    backlog:
+      type: stdio
+      command: backlog-mcp-server
+  targets:
+    personas:
+      assistant:
+        servers: [backlog]
+```
+
 | フィールド | 型 | 説明 |
 |---|---|---|
 | `mcp.servers` | `{ <名前>: ServerEntry }` | 名前付き MCP server 定義（`stdio` / `sse` / `http`）。ここで定義しただけでは有効化せず、`defaults` または `targets` で割り当てる必要があります。 |
@@ -1130,6 +1350,34 @@ global と project 両方の `runtime.yaml` が `mcp` セクションを持つ�
 ### 環境変数補間
 
 `command`、`args`、`env`、`url`、`headers` 内の `${NAME}` 参照は agent 起動前に `process.env` で解決します。未定義の必須環境変数は fail-fast し、空文字列で黙に置換しません。解決済みの秘密値（env, headers）はログやエラーメッセージへ出力しません。
+
+runtime の HTTP/SSE の **headers だけ**で使える `${env:NAME}` は、provider が自身の環境変数を読む指定です。TAKT は定義の有無を確認して変数名を渡し、値を起動引数・一時ファイル・環境変数内の設定 JSON・ログへ転記しません。provider プロセスの環境には変数を残します。`${NAME}` は従来どおり起動前に展開するため、それらの起動素材に値が載る場合があります。固定ヘッダの内容は変わりません。新しい設定キーや `provider_options` の設定は不要です。
+
+```yaml
+mcp:
+  servers:
+    datadog:
+      type: http
+      url: https://mcp.datadoghq.com/api/unstable/mcp-server/mcp
+      headers:
+        Authorization: "Bearer ${env:DD_ACCESS_TOKEN}"
+        X-Tenant: "${TENANT}"
+  defaults:
+    servers: [datadog]
+```
+
+| Provider / 実行経路 | runtime ヘッダ参照への対応 |
+|---|---|
+| Codex（MCP 専用実行を含む。CLI 0.162.1 で確認） | 対応。`Authorization: "Bearer ${env:X}"` は `bearer_token_env_var`、値全体が `${env:X}` のヘッダは `env_http_headers` へ変換 |
+| OpenCode v1 / v2（CLI 1.18.2 / 2.0.18 で確認） | 対応。`OPENCODE_CONFIG_CONTENT` 内の `{env:X}` へ変換。前後の文字列も利用可能 |
+| Claude SDK / Headless / Terminal | TAKT のインライン・ファイル・terminal 経路は未確認のため対象サーバを除外 |
+| Cursor / Copilot / その他の provider | 未確認のため対象サーバを除外 |
+
+Codex では `Token ${env:X}` のような別の前置文字列や、1 つのヘッダ内の複数参照を表現できません。TAKT は provider 名・サーバ名・理由を含む警告を出し、その実行ではサーバ全体を除外します。未確認の provider にも同じ規則を適用します。他のサーバと後続の workflow step は継続します。平文へのフォールバックは行いません。従来の展開が必要な場合は利用者が `${NAME}` を明示してください。未定義変数は非対応 provider でも除外警告や provider 起動より前にエラーになります。空文字列でも定義済みなら受理します。URL と stdio のフィールドに `${env:NAME}` の意味は追加しません。`${NAME}` の展開結果も provider 参照として再解釈しません。
+
+Codex では参照変数を AI のツールシェルから `shell_environment_policy.filters` で自動除外し、通常の PATH 設定と合成します。PATH 自身が参照対象ならシェル設定へ値を転記しません。通常実行と MCP 専用実行の両方に適用します。他の provider には TAKT が提供する同等のシェル除外がなく、OpenCode のシェルツールには参照変数が継承されます。
+
+`${NAME}` を使う場合の起動素材への露出先は、Codex と Claude SDK では argv、Claude Headless/Terminal・Cursor・Copilot では一時ファイル、OpenCode では `OPENCODE_CONFIG_CONTENT` の JSON です。`${env:NAME}` は上表の対応経路でこれらへの転記を防ぎますが、provider 自身のプロセス環境から値を削除する機能ではありません。
 
 ### provider 別 transport 対応
 
@@ -1170,11 +1418,19 @@ Provider プロファイルを使用すると、各 provider にデフォルト�
 
 TAKT は provider 非依存の3つのパーミッションモードを使用します。
 
-| モード | 説明 | Claude | Codex | OpenCode | Pi | DeepSeek Harness | Cursor Agent | Copilot | Kiro CLI |
-|--------|------|--------|-------|----------|----|-----------------|--------------|---------|----------|
-| `readonly` | 読み取り専用、ファイル変更不可 | `default` | `read-only` | `read-only` | `read`, `grep`, `find`, `ls`, `codemode` | この SDK では公開されません | デフォルトフラグ（`--force` なし） | フラグなし | `--trust-tools=read,grep` |
-| `edit` | 確認付きでファイル編集を許可 | `acceptEdits` | `workspace-write` | `workspace-write` | `read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, `codemode` | この SDK では公開されません | デフォルトフラグ（`--force` なし） | `--allow-all-tools --no-ask-user` | `--trust-tools=read,grep,write,shell` |
-| `full` | すべてのパーミッションチェックをバイパス | `bypassPermissions` | `danger-full-access` | `danger-full-access` | 登録済み Pi tool すべて | この SDK では公開されません | `--force` | `--yolo` | `--trust-all-tools` |
+| モード | 説明 | Claude | Codex | OpenCode | Pi | DeepSeek Harness | Cursor Agent | Copilot | Kiro CLI | Devin CLI |
+|--------|------|--------|-------|----------|----|-----------------|--------------|---------|----------|-----------|
+| `readonly` | 読み取り専用、ファイル変更不可 | `default` | `read-only` | `read-only` | `read`, `grep`, `find`, `ls`, `codemode` | この SDK では公開されません | デフォルトフラグ（`--force` なし） | フラグなし | `--trust-tools=read,grep` | `ask` ACP session mode + 生成 `--config` の deny ルール（`exec`、`edit`、`Write(**)`、`mcp__*`） |
+| `edit` | 確認付きでファイル編集を許可 | `acceptEdits` | `workspace-write` | `workspace-write` | `read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, `codemode` | この SDK では公開されません | デフォルトフラグ（`--force` なし） | `--allow-all-tools --no-ask-user` | `--trust-tools=read,grep,write,shell` | `accept-edits` ACP session mode + 生成 `--config` の allow ルール（`exec`、`edit`、`Write(**)`） |
+| `full` | すべてのパーミッションチェックをバイパス | `bypassPermissions` | `danger-full-access` | `danger-full-access` | 登録済み Pi tool すべて | この SDK では公開されません | `--force` | `--yolo` | `--trust-all-tools` | `bypass` ACP session mode。permission 要求には `allow_once` で応答 |
+
+Claude SDK（`claude-sdk` とその別名 `claude`）で `full` を要求しても、組織の管理ポリシーなどにより `bypassPermissions` が採用されない場合があります。TAKT は新規・再開セッションの `system/init` が報告した実際のモードを確認し、`bypassPermissions` でなければ `auto` への切り替え完了までツール実行を待たせます。ツールの許可・拒否は Claude CLI が判断します。要求したモード・実際のモード・切り替え先を警告ログに記録します。`auto` への切り替えも拒否された場合は失敗を警告ログに記録し、待機を解除して init が報告したモードで続行します。この警告は manager の会話本文に関する診断ログ抑制とは別に、通常のログ設定に従って出力します。この切り替えは `claude-headless` と `claude-terminal` には適用しません。
+
+manager の自前 MCP ツールは SDK の `allowedTools` に登録して事前承認します。他の通常ツールや利用者の MCP ツールは引き続き利用可能で、それぞれの権限設定に従います。director も既存の専用ツール制限を通じて自前 MCP ツールを事前承認します。
+
+Devin は print モードではなく `devin acp`（stdio 上の Agent Client Protocol）経由で実行されるため、permission mode は3つの層で強制されます。`session/set_mode` で設定する ACP session mode（`readonly` は `ask`、`edit` と未設定は `accept-edits`、`full` は `bypass`）、ユーザーの Devin config（`$XDG_CONFIG_HOME/devin/config.json`、既定 `~/.config/devin/config.json`。Windows は `%APPDATA%\devin\config.json`）を元に生成した `--config` へ追加する permission ルール、そして `session/request_permission` への応答です。TAKT に届いた要求に対しては `allow_once` が `full` モードでのみ選択され、`allow_always` は Devin config に決定を永続化するため選択されません。`strict-readonly` の internal-agent 隔離では `Fetch(**)` も追加で拒否します。
+
+生成する `--config` が置き換えるのは Devin のユーザーレベル config のみです。リポジトリ内のプロジェクトレベル `.devin/config.json`（および `.devin/config.local.json`）は Devin でより優先され、その `permissions.allow` ルールは Devin が TAKT に permission を要求する前に tool call を事前承認します。実測では、`edit` モードまたは permission mode 未設定時に、リポジトリの `.devin/config.json` に `allow: ["exec", ...]` があると TAKT が拒否するはずの shell コマンドが実行されました。`readonly` と `strict-readonly` は影響を受けません（ACP `ask` モードは write/exec tool を公開しないため）。また、TAKT が発行するルールについては TAKT の `deny` ルールがプロジェクトの `allow` ルールに優先します。信頼できないリポジトリで `edit` モードの Devin step を実行する前に、そのリポジトリの `.devin/config.json` を確認してください。
 
 Pi の permission mode は SDK の active-tool allowlist であり、OS sandbox ではありません。また、TAKT は Pi に tool ごとの確認 prompt を追加しません。特に Pi の `edit` は `bash` を有効化し、file tool は絶対 path も受け取れます。信頼できる workflow input と extension だけで実行してください。internal agent の role に狭い権限が必要なら、Pi の profile に capabilities と permission mode を明示してください。
 
@@ -1365,7 +1621,7 @@ provider option は対応する `TAKT_PROVIDER_OPTIONS_*` 環境変数でも指�
 | Codex の権限と Skill | `TAKT_PROVIDER_OPTIONS_CODEX_PERMISSION_CONTROL=codex`、`TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_REPO=true`、`TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_USER=true` |
 | Claude の Skill | `TAKT_PROVIDER_OPTIONS_CLAUDE_SKILLS_ENABLED=true` |
 | Claude terminal | `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_BACKEND=tmux`、`TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_TIMEOUT_MS=900000`、`TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_KEEP_SESSION=false`、`TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_TRANSCRIPT_POLL_INTERVAL_MS=500` |
-| Kiro の agent | `TAKT_PROVIDER_OPTIONS_KIRO_AGENT=planner-agent` |
+| Kiro の agent と effort | `TAKT_PROVIDER_OPTIONS_KIRO_AGENT=planner-agent`、`TAKT_PROVIDER_OPTIONS_KIRO_EFFORT=medium` |
 | Pi の推論・リソース | `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL=high`、`TAKT_PROVIDER_OPTIONS_PI_EXTENSIONS='["npm:pi-fff"]'`、`TAKT_PROVIDER_OPTIONS_PI_NO_EXTENSIONS=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_SKILLS=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_PROMPT_TEMPLATES=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_THEMES=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_CONTEXT_FILES=true` |
 | Pi の system prompt | `TAKT_PROVIDER_OPTIONS_PI_SYSTEM_PROMPT_MODE=append` または `replace` |
 
@@ -1435,7 +1691,7 @@ Git source の動作も引き続き利用できます。平文の `http://` と 
 
 DeepSeek SDK はファイル操作、検索、shell、subagent などのツールを使います。SDK の workspace-write は書き込みを制限しますが、secret file の読み取りを隔離しません。信頼する workspace で実行してください。TAKT は SDK の session ファイルへの永続化と session log の API 送信を無効にしています。
 
-DeepSeek SDK は permission mode/callback、`bypassPermissions`、明示的な allowed-tools list、空でない MCP server map、`maxTurns`、structured output、image attachment に対応していません。これらを必要とする step は実行前にエラーになります。report/status phase のようにツール禁止を要求する step も実行できません。対応する制約を提供する別の provider を選んでください。
+DeepSeek SDK は permission mode/callback、`bypassPermissions`、明示的な allowed-tools list、空でない MCP server map、`maxTurns`、structured output、image attachment に対応していません。これらを必要とする step は実行前にエラーになります。読み取り専用のツールを使う report phase と、ツールを使わない status phase も実行できません。対応する制約を提供する別の provider を選んでください。
 
 以前の Python/uv 版から移行する場合は、`runtime_mode` と Python/uv 専用 option、および `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_RUNTIME_MODE` と `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_PYTHON_PATH` を設定から除いてください。現在の導入コマンドは `takt install deepseek-harness` です。旧 `venv/`、`pyproject.toml`、`uv.lock` を手動で整理する場合は、すべての TAKT/DeepSeek process を停止し、必要なデータをバックアップしてから旧環境のファイルであることを確認してください。`$DSH_HOME` の credential store と現在の `deepseek-harness/sdk`、`state/`、`dsh-home/`、`install.lock` は保持します。
 
@@ -1452,6 +1708,8 @@ provider_options:
   codex:
     network_access: true
 ```
+
+TAKT が権限を管理する Phase 1 では、書き込みを禁止したまま通信を許可できます。`edit: false` の step と `permission_mode: readonly` に解決された呼び出しが対象です。`permission_control: codex` では Codex 側で通信を設定してください。Phase 2 と `strict-readonly` で動く TAKT の内部呼び出し（隔離された構造化呼び出しなど）は常に `read-only` sandbox を使い、`network_access: true` でも通信を禁止します。
 
 OpenCode はネイティブのサンドボックスを持ちません。TAKT は `webfetch` / `websearch` ツールの権限を抽象化レイヤーで制御し、同じキーで設定できます。
 
@@ -1470,6 +1728,10 @@ provider_options:
 ```
 
 runtime profile または capability preset で設定できます。legacy モードでは `provider_routing`、deprecated の `persona_providers`、project、global config からも設定できます。環境変数 `TAKT_PROVIDER_OPTIONS_CODEX_NETWORK_ACCESS=true` でも上書きできます。
+
+#### Codex の context compaction からの復帰
+
+Codex が Phase 1 の実行中に transport または session rollout へ `compacted` event を記録した場合、TAKT は現在の turn の完了を待ってから同じ thread を resume し、compaction が発生したことを示す文脈と元の Phase 1 指示を再投入します。復帰 turn は逐次実行し、provider call ごとに3回までです。復帰に失敗した場合、または上限後にさらに compaction が発生した場合は step を成功とせず、その失敗を返します。assistant の応答文から compaction を推測することはありません。このイベントを発行しない provider、または復帰に対応しない provider の動作は変わりません。この自動復帰は workflow の `session: compact` とは別の処理であり、既存の `session: compact` の動作は変更しません。
 
 #### Codex の fast mode (`fast_mode`)
 
@@ -1490,7 +1752,16 @@ runtime profile、legacy の `provider_routing`、project・global の `provider
 
 #### Codex の permission control (`permission_control`)
 
-Codex はデフォルトで TAKT の permission mode マッピングを使います。これは `permission_control: takt` と同じで、解決済みの TAKT `permission_mode` を Codex SDK の `sandboxMode` へ渡します。`network_access` を指定した場合は `networkAccessEnabled` にも渡します。省略時は Codex の既定値（`false`）を維持します。
+Codex の権限はデフォルトで TAKT が管理します。これは `permission_control: takt` と同じです。書き込み可否と `network_access` を別々に解決します。Phase 1 では `edit: false` または解決済みの `permission_mode: readonly` により書き込みを禁止します。`permission_mode: full` でも `edit: false` が優先されます。
+
+| 書き込み | `network_access` | Codex に渡す設定 |
+|---|---|---|
+| 許可 | `true` | `workspace-write` sandbox（`full` なら `danger-full-access`）と `networkAccessEnabled: true` |
+| 許可 | `false` / 未指定 | 従来の sandbox マッピング。明示した `false` は渡し、未指定なら Codex の既定値を維持 |
+| 禁止 | `true` | sandbox フラグを渡さず、`:read-only` を継承して `network.enabled=true` にした `takt-readonly-network` 権限プロファイルを `--config` で渡す |
+| 禁止 | `false` / 未指定 | `read-only` sandbox |
+
+TAKT が権限を管理する場合は、書き込み可能な step を含むすべての `codex exec` に `--ignore-rules` を付けます。新規セッションと `exec ... resume <id>` の両方が対象です。これにより、サンドボックス外でのコマンド実行を許可する利用者・プロジェクトの execpolicy `.rules` ファイルを読み込ませません。`permission_control: codex` ではルールを利用者の設定に委ねます。ただし Phase 2、`strict-readonly` で動く TAKT の内部呼び出し（隔離された構造化呼び出しなど）、MCP のみに副作用を許可するモードは常に `--ignore-rules` を付け、書き込みと通信を禁止します。Phase 2 またはこれらの内部呼び出しで `config_profile` を指定した場合は `--ignore-rules` と `--profile <name>` の両方を渡します。補助コマンドの `mcp list` / `mcp get` には exec 用のフラグを付けません。
 
 Codex 側へ権限制御を委譲する場合だけ、明示的に opt-in します。
 
@@ -1506,6 +1777,8 @@ provider_options:
 ```
 
 `permission_control: codex` ではサンドボックスとネットワークの権限を Codex の設定に委ねます。この場合、TAKT の `network_access` は Codex の実効権限に反映されません。非対話実行の `approvalPolicy: never` は引き続き適用されるため、使用する Codex の設定を確認してください。`reasoning_effort`、`fast_mode`、`skills` は通常どおり適用されます。
+
+Phase 1 の `permission_control: codex` では `edit: false` や `permission_mode: readonly` でも TAKT の sandbox・ネットワーク指定を省略し、実効権限を Codex の設定に委ねます。`strict-readonly` を指定しない構造化呼び出しにも同じ規則を適用します。Phase 2 と `strict-readonly` で動く TAKT の内部呼び出し（隔離された構造化呼び出しなど）は例外で、権限の委譲時も TAKT が管理し、常に `read-only` sandbox と `networkAccessEnabled: false` を渡します。MCP のみに副作用を許可するモードも `read-only` sandbox を維持し、通信と Web 検索を明示的に禁止します。このモードと `permission_control: codex` は併用できません。
 
 Codex の設定プロファイルを名前で選択するには、`permission_control: codex` と一緒に `config_profile` を指定します。
 
@@ -1566,6 +1839,39 @@ provider_options:
 ```
 
 ファイル編集の権限は引き続き `permission_mode` で制御されます。
+
+<a id="claude-read-deny-rules"></a>
+
+#### Claude Code の Read 拒否ルール (`permissions`)
+
+TAKT から起動した Claude に `permissions.deny` のルール（例: `Read(./.env)`）を適用させるには、`provider_options.claude.permissions` でルールを Claude に渡します。
+
+```yaml
+provider_options:
+  claude:
+    permissions:
+      deny:
+        - "Read(./.env)"
+        - "Read(~/.ssh/**)"
+      import_user_read_deny: true
+```
+
+| キー | 型 | 既定値 | 意味 |
+|------|----|--------|------|
+| `deny` | 空でない文字列のリスト | なし | TAKT の設定に書くルールです。書いたとおりに Claude へ渡すので、`Read(` で始まるルールには限定しません。 |
+| `import_user_read_deny` | boolean | `false` | `true` のとき、`~/.claude/settings.json` の `permissions.deny` から、`Read(` で始まる（大文字と小文字を区別する）ルールも取り込みます。Bash 系、MCP 系、その他のルールは取り込みません。 |
+
+- `Read(` ルールが止める範囲は、TAKT ではなく Claude Code が決めます。
+  [Claude Code の権限に関するドキュメント](https://code.claude.com/docs/en/permissions)によると、止まるのは Claude の組み込みのファイルツール（Grep や Glob などには、`Read` ルールをベストエフォートで適用します）と、Claude Code が Bash の中で認識するファイル用コマンド（`cat`、`head`、`tail`、`sed`、`tee` など）です。
+  ファイル名を書かずにファイルを読むコマンド（`grep -r pattern .` など）や、Python や Node のスクリプトのように自分でファイルを開くものは、止まりません。
+  Claude が sandbox 内で実行するシェルのコマンドと、そこから起動したプロセスによるパスへのアクセスを OS のレベルで止めるには、そのパスの `Read(` 拒否ルールを追加し、[Claude Code の sandbox](https://code.claude.com/docs/en/sandboxing.md) をファイルシステム隔離付きで有効にしてください。`sandbox.filesystem.disabled: true` は隔離を無効にし、sandbox 内のコマンドがホスト上のファイルを読めるため設定しないでください。`excludedCommands` に一致するコマンドや `allow_unsandboxed_commands` により sandbox 外で実行されるコマンドは、この遮断の対象外です。
+  拒否ルールのないパスは、sandbox の中のプロセスでも読めます。
+  hooks や MCP サーバーなど、sandbox の外で動くプロセスは止まりません。
+- Claude に渡すルールは、`deny` と取り込んだルールの和集合で、重複は 1 つにまとめます。TAKT は Claude の flag settings の `permissions.deny` として渡します（`claude-sdk` は SDK の `settings` オプション、`claude-headless` は `--settings`）。そのため、ステータス判定のような隔離された内部の呼び出しにも効きます。
+- 対象は `claude-sdk`（別名 `claude` を含む）と `claude-headless` で、workflow の step、内部の呼び出し、対話モードのアシスタントのすべてに効きます。`claude-terminal` には渡さず、後述の警告も出しません。
+- ユーザー設定のファイルは、現在のユーザーのホームディレクトリにある `~/.claude/settings.json` に固定です。`CLAUDE_CONFIG_DIR` は参照しません。ファイルを読むのは `import_user_read_deny` が `true` のときだけで、Claude を起動するたびに読みます。2 つのキーを指定しない場合は、ファイルを読まず、Claude の起動引数も従来どおりです。
+- ファイルが存在しない、読めない、JSON として不正、または `permissions` や `permissions.deny` の型が違う場合は、TAKT が警告を出し、`deny` のルールだけで Claude を起動します。ファイルを読めて `Read(` のルールが 1 件もないときは、何も取り込まず、警告も出しません。`permissions.deny` の要素のうち文字列でないものは無視します。
+- 2 つのキーは、ほかの `provider_options` の leaf と同じ層と上書きの規則に従います。上位の層は `deny` のリスト全体を置き換え、リストどうしは連結しません。環境変数は `TAKT_PROVIDER_OPTIONS_CLAUDE_PERMISSIONS_DENY`（JSON 配列）と `TAKT_PROVIDER_OPTIONS_CLAUDE_PERMISSIONS_IMPORT_USER_READ_DENY` です。
 
 <a id="pi-resource-loading"></a>
 
@@ -1754,6 +2060,7 @@ Companion reviewer、moderator、selector は `readonly` permission mode で実�
 | `mock` | scenario に依存 |
 | `opencode` | ライブ |
 | `pi` | ライブ |
+| `devin` | ライブ |
 | `cursor`、`copilot`、`kiro` | 利用不可 |
 
 ライブの tool event がない場合も完了レビューとターン境界での指摘配達は動作します。
@@ -1798,7 +2105,7 @@ merge:
     same_repository: true
 ```
 
-既定では `merge-review-fix-simple` が1体のレビュアーによるレビューと別ステップの裁定・修正・検証を行い、`squash` でマージします。並列レビューを使う場合は `workflow: merge-review-fix` を指定します。一括処理は既定で2件を同時実行し、draft と fork は除外します。`merge.concurrency` は正の安全な整数を受け付け、`takt run` / `takt watch` の `concurrency` とは独立しています。CLI の `--concurrency` が優先します。`method` は `squash`、`merge`、`rebase` から選べます。自動起動は既定で無効です。
+既定では `merge-review-fix-simple` がベースブランチを同期します。競合のない同期ではフルレビューを呼ばず、AIによる競合解消時は1体のレビュアーによるレビューと別ステップの裁定・修正・検証を行います。CacciaとCI通過後に `squash` でマージします。並列レビューを使う場合は `workflow: merge-review-fix` を指定します。一括処理は既定で2件を同時実行し、draft と fork は除外します。`merge.concurrency` は正の安全な整数を受け付け、`takt run` / `takt watch` の `concurrency` とは独立しています。CLI の `--concurrency` が優先します。`method` は `squash`、`merge`、`rebase` から選べます。自動起動は既定で無効です。
 
 GitLab は MR 詳細・CI 状態の取得と一括選定に対応します。Caccia が有効な場合、`takt merge` と `from_pr` タスクの Caccia 効果は `github_unavailable` の `skipped` を返し、その head の CI 待ちへ進みます。統合結果 pipeline は merge commit の第2親と source head の一致を確認します。pipeline がない場合や古い head に対応する場合は成功扱いにしません。マージ方式の指定と head 一致制約には未対応のため、これらを使う `merge_pr` は失敗します。CI 待機の完了はマージ成功を意味しません。
 
@@ -1812,3 +2119,11 @@ fork の除外も `where` より先に適用します。fork を対象にする�
 `threat_check_max_diff_bytes` は fork の AI 評価へ渡す累積差分の上限で、正の整数（UTF-8 バイト数）です。既定は200,000です。上限超過では差分を切り詰めて判定せず、人間による確認を求める PR コメントを残して停止します。機械的検査で指示ファイル・CI 定義や危険な Git 設定を検出した場合、AI 評価と本体 workflow は実行しません。
 
 `auto_start: true` は workflow が PR を作成・更新した後、その PR を対象にマージ処理を起動します。マージ用 workflow に明示の Caccia 効果があれば後処理の Caccia を抑止します。実行した workflow とマージ用 workflow のどちらにも効果がなければ、有効設定時の後処理の Caccia が完了してからマージ処理を起動します。手動で作成した PR は自動起動の対象外です。
+
+## manager のゴールと形式仕様
+
+`assistant.formal_spec` は manager のゴール登録案にも適用されます。manager は登録のたびに質問せず、`true` と `"Y/n"` では Quint と Alloy を両方含め、`false` と `"y/N"` では含めません。project が global に優先し、object の各フィールドを独立に解決します。`comments` と `model_check_timeout_seconds` も対話モードと同じ設定を使います。
+
+開発・実装のゴールには、解釈の誤りで結果が変わる重要な観測可能な振る舞いを Gherkin で記述します。同じ期待結果を受け入れ条件にも重ねて書きません。Gherkin のキーワードは英語で、説明は日本語にできます。調査・文書・運用など、実装を成果物としないゴールには Gherkin を付けません。
+
+TUI と Slack の manager の会話で `/verify` を入力すると、現在の合意から Quint と Alloy の仕様を生成し、対話モードと同じ検査器で検証します。結果は同じ会話に戻り、manager が診断や反例を解釈します。形式仕様が無効なら利用できない旨を表示します。登録前に自動では検証せず、検証だけではゴールを登録したり、登録案や保存済み仕様を書き換えたりしません。

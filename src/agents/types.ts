@@ -44,6 +44,8 @@ export interface RunAgentOptions {
   cwd: string;
   executionProfile?: 'isolated-structured';
   projectCwd?: string;
+  /** TAKT-owned external context directories OpenCode may read for this run. */
+  openCodeExternalDirectories?: readonly string[];
   abortSignal?: AbortSignal;
   sessionId?: string;
   model?: string;
@@ -79,6 +81,7 @@ export interface RunAgentOptions {
   mcpServerIdentity?: string;
   maxTurns?: number;
   permissionMode?: PermissionMode;
+  edit?: boolean;
   permissionResolution?: {
     stepName: string;
     requiredPermissionMode?: PermissionMode;

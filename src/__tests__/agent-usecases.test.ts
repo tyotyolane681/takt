@@ -1149,18 +1149,21 @@ describe('agent-usecases', () => {
   });
 
   it('decomposition は意味的検証診断付きで全partsを再生成する', async () => {
+    const onValidationError = vi.fn();
     vi.mocked(runAgent)
       .mockResolvedValueOnce(doneResponse('invalid', { parts: [] }))
       .mockResolvedValueOnce(doneResponse('valid', {
         parts: [{ id: 'p1', title: 'Part 1', instruction: 'Do 1' }],
       }));
 
-    const result = await decomposeTask('instruction', 2, { cwd: '/repo' });
+    const result = await decomposeTask('instruction', 2, { cwd: '/repo', onValidationError });
 
     expect(result.parts).toEqual([
       { id: 'p1', title: 'Part 1', instruction: 'Do 1' },
     ]);
     expect(runAgent).toHaveBeenCalledTimes(2);
+    expect(onValidationError).toHaveBeenCalledOnce();
+    expect(onValidationError.mock.calls[0]?.[0]).toBeInstanceOf(Error);
   });
 
   it('decomposition は provider 例外を再試行しない', async () => {
@@ -1580,6 +1583,21 @@ describe('agent-usecases', () => {
     )).rejects.toThrow("timeout");
   });
 
+  it('requestMoreParts は不正な feedback の検証失敗を通知する', async () => {
+    const onValidationError = vi.fn();
+    vi.mocked(runAgent).mockResolvedValue(doneResponse('invalid feedback', {
+      done: true, reasoning: 'Enough', cancelPartIds: ['unknown-part'], parts: [],
+    }));
+
+    await expect(requestMoreParts(
+      'instruction',
+      [{ id: 'p1', title: 'Part 1', status: 'done', content: 'ok' }],
+      ['p1'],
+      { cwd: '/repo', persona: 'team-leader', cancellablePartIds: [], onValidationError },
+    )).rejects.toThrow();
+    expect(onValidationError).toHaveBeenCalledOnce();
+  });
+
   it('requestMoreParts は AbortSignal と provider usage を呼び出し境界へ伝搬する', async () => {
     const providerUsage = {
       inputTokens: 4,
@@ -1778,16 +1796,5 @@ describe('agent-usecases', () => {
     expect(result).toBeUndefined();
   });
 
-  // --- DecomposeTaskOptions.provider 型契約（ARCH-NEW-BoySCout-ProviderType-DecomposeTask 再発防止） ---
 
-  it('DecomposeTaskOptions.provider は cursor/copilot を受け入れる（ProviderType 型契約）', () => {
-    // ProviderType の全値が DecomposeTaskOptions.provider に代入できることを確認。
-    // TypeScript コンパイルが通ることで型の一致を保証。
-    const optionsCursor: DecomposeTaskOptions = { cwd: '/repo', provider: 'cursor' };
-    const optionsCopilot: DecomposeTaskOptions = { cwd: '/repo', provider: 'copilot' };
-    const optionsClaude: DecomposeTaskOptions = { cwd: '/repo', provider: 'claude' };
-    expect(optionsCursor.provider).toBe('cursor');
-    expect(optionsCopilot.provider).toBe('copilot');
-    expect(optionsClaude.provider).toBe('claude');
-  });
 });

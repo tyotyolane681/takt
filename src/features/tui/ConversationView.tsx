@@ -1,5 +1,6 @@
-import { Box, Text, useInput, useWindowSize } from 'ink';
+import { Box, Text, useInput, usePaste, useWindowSize } from 'ink';
 import stringWidth from 'string-width';
+import { formatElapsedTime, truncateStatusText } from './statusText.js';
 import {
   useCallback,
   useEffect,
@@ -11,7 +12,10 @@ import {
 } from 'react';
 import type { InteractiveModeResult } from '../interactive/interactive.js';
 import type { StreamEvent } from '../../shared/types/provider.js';
-import { formatToolInput } from '../../shared/ui/toolInput.js';
+import { ToolActivityDisplay } from '../../shared/ui/ToolActivityDisplay.js';
+import { getLabel } from '../../shared/i18n/index.js';
+import { ToolActivityView } from './ToolActivityView.js';
+import { createToolActivityViewState, moveToolActivityView, toggleToolActivityView, toolActivityViewPage } from './toolActivityViewState.js';
 import { segmentGraphemes } from '../../shared/utils/grapheme.js';
 import { MAX_VISIBLE_ROWS, PromptInput } from './PromptInput.js';
 import { StatusLine } from './StatusLine.js';
@@ -134,30 +138,8 @@ const CANCELLED: InteractiveModeResult = { action: 'cancel', task: '' };
 /** Queued lines shown below the prompt; the rest are counted in one row. */
 const MAX_QUEUE_ROWS = 3;
 
-interface ToolActivity {
-  readonly id: string;
-  readonly name: string;
-  readonly inputSummary: string;
-}
-
 interface Activity {
   readonly kind: 'waiting' | 'thinking' | 'responding' | 'tool';
-  readonly tools: readonly ToolActivity[];
-}
-
-function truncateStatusText(text: string, columns: number): string {
-  if (columns <= 0) return '';
-  if (stringWidth(text) <= columns) return text;
-  const graphemes = segmentGraphemes(text);
-  let result = '';
-  let width = stringWidth('…');
-  for (const grapheme of graphemes) {
-    const nextWidth = width + stringWidth(grapheme);
-    if (nextWidth > columns) break;
-    result += grapheme;
-    width = nextWidth;
-  }
-  return `${result}…`;
 }
 
 /** `/go` asks the session for a task instruction rather than for a reply. */
@@ -170,7 +152,7 @@ function transcriptEntry(role: TranscriptEntry['role'], content: string): Transc
   return { role, content: toDisplayText(content) };
 }
 
-/** Owns the editable conversation frame, queued turns, confirmation input and terminal handoffs. */
+/** Owns the editable conversation frame, queued turns and terminal handoffs. */
 export function ConversationView({
   ui,
   lang,
@@ -204,7 +186,9 @@ export function ConversationView({
   const [editor, setEditorView] = useState<EditorState>(editorRef.current);
   const [streamingRaw, setStreamingRaw] = useState('');
   const [turn, setTurn] = useState<{ readonly id: number; readonly startedAt: number } | null>(null);
-  const [activity, setActivity] = useState<Activity>({ kind: 'waiting', tools: [] });
+  const [activity, setActivity] = useState<Activity>({ kind: 'waiting' });
+  const [toolDisplay, setToolDisplay] = useState(() => new ToolActivityDisplay('silent', false, () => undefined, false));
+  const [toolView, setToolView] = useState(createToolActivityViewState);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const isBusy = turn !== null;
   /**
@@ -229,8 +213,6 @@ export function ConversationView({
   /** True from the moment this view decides to hand the terminal to a selector. */
   const [isFinishing, setIsFinishing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [confirmationMessage, setConfirmationMessage] = useState<string | null>(null);
-  const confirmationRef = useRef<((answer: boolean) => void) | null>(null);
   const liveStatusRef = useRef('');
   const liveStatusListenersRef = useRef(new Set<() => void>());
   const liveStatus = useSyncExternalStore(
@@ -290,11 +272,14 @@ export function ConversationView({
   const slashCompletion = useSlashCompletion(allCompletions);
   const { completions, completionIndex, reset: resetCompletion } = slashCompletion;
   const streamingPreview = useMemo(() => toDisplayText(streamingRaw), [streamingRaw]);
-  const elapsed = elapsedSeconds < 60
-    ? `${elapsedSeconds}s`
-    : `${Math.floor(elapsedSeconds / 60)}m${String(elapsedSeconds % 60).padStart(2, '0')}s`;
-  const activeTool = activity.kind === 'tool' ? activity.tools.at(-1) : undefined;
-  const activityLabel = activeTool !== undefined ? activeTool.name
+  const elapsed = formatElapsedTime(elapsedSeconds);
+  const toolGroups = toolDisplay.groups().map((group) => ({
+    ...group,
+    entries: turn === null ? group.entries.filter((entry) => entry.status !== 'running') : group.entries,
+  })).filter((group) => group.entries.length > 0);
+  const activeTool = activity.kind === 'tool'
+    ? toolGroups.flatMap((group) => group.entries).filter((entry) => entry.status === 'running').at(-1) : undefined;
+  const activityLabel = activeTool !== undefined ? activeTool.tool
     : activity.kind === 'thinking' ? ui.extendedThinking
     : activity.kind === 'responding' ? ui.responding : ui.thinking;
   // Reserve the spinner and its following space before choosing the hint.
@@ -314,7 +299,7 @@ export function ConversationView({
   }
   const requiredStatus = displayedActivity === '' ? statusSuffix : `${displayedActivity} ${statusSuffix}`;
   const rawInputSummary = activeTool !== undefined
-    ? truncateStatusText(activeTool.inputSummary, columns - 2 - stringWidth(requiredStatus) - 1)
+    ? truncateStatusText(toSingleLineText(activeTool.input), columns - 2 - stringWidth(requiredStatus) - 1)
     : '';
   const inputSummary = rawInputSummary === '…' ? '' : rawInputSummary;
   const statusLabel = `${requiredStatus}${inputSummary === '' ? '' : ` ${inputSummary}`}`;
@@ -332,12 +317,6 @@ export function ConversationView({
   // to scrollback.
   // Leave one terminal row free for Ink's trailing line break.
   let remainingLiveRows = Math.max(1, (rows || 24) - 1) - 1;
-  // Keep the caret row; a pending confirmation gets the next row before status
-  // and optional chrome. Its single-line rendering cannot exceed this budget.
-  const showConfirmation = confirmationMessage !== null && remainingLiveRows > 0;
-  if (showConfirmation) {
-    remainingLiveRows -= 1;
-  }
   const showStatusLine = remainingLiveRows > 0;
   if (showStatusLine) {
     remainingLiveRows -= 1;
@@ -383,6 +362,17 @@ export function ConversationView({
     : 0;
   remainingLiveRows -= visibleCompletionCount - visibleCompletionRows;
   const showModelRow = remainingLiveRows > 0;
+  remainingLiveRows -= Number(showModelRow);
+  const toolHistoryHeight = toolGroups.length === 0 ? 0 : Math.max(0, remainingLiveRows);
+  const toolLabels = {
+    compact: getLabel('tui.ui.toolHistoryCompact', lang),
+    expanded: getLabel('tui.ui.toolHistoryExpanded', lang),
+    more: getLabel('tui.ui.toolHistoryMore', lang),
+    end: getLabel('tui.ui.toolHistoryEnd', lang),
+    completion: getLabel('tui.ui.toolHistoryCompletion', lang),
+  };
+  const toolPage = toolActivityViewPage(toolDisplay, toolGroups, toolView, columns,
+    Math.max(0, toolHistoryHeight - 1), toolLabels);
   const queuedSummary = queue.length > visibleQueueRows
     ? `${ui.queuedHint}  ${ui.queuedMore.replace('{count}', String(queue.length - visibleQueueRows))}`
     : ui.queuedHint;
@@ -425,7 +415,6 @@ export function ConversationView({
   // touching state or leaving the provider call running.
   useEffect(() => () => {
     exitedRef.current = true;
-    confirmationRef.current?.(false);
     for (const work of pendingRef.current) {
       work.controller.abort();
     }
@@ -468,6 +457,7 @@ export function ConversationView({
     text: string,
     controller: AbortController,
     submissionId: number,
+    display: ToolActivityDisplay,
   ): Promise<void> => {
     /** False once this call was interrupted or the view moved on. */
     const isCurrent = (): boolean =>
@@ -478,19 +468,6 @@ export function ConversationView({
       const submitInput = {
         text,
         abortSignal: controller.signal,
-        confirmManagedProvider: (message: string): Promise<boolean> => new Promise((resolve) => {
-          if (controller.signal.aborted || !isCurrent()) { resolve(false); return; }
-          const finish = (answer: boolean): void => {
-            controller.signal.removeEventListener('abort', onAbort);
-            confirmationRef.current = null;
-            if (!exitedRef.current) setConfirmationMessage(null);
-            resolve(answer);
-          };
-          const onAbort = (): void => finish(false);
-          confirmationRef.current = finish;
-          setConfirmationMessage(message);
-          controller.signal.addEventListener('abort', onAbort, { once: true });
-        }),
         onAssistantChunk: (chunk: string) => {
           if (!isCurrent()) {
             return;
@@ -505,34 +482,19 @@ export function ConversationView({
               setActivity((current) => ({ ...current, kind: 'thinking' }));
               break;
             case 'tool_use':
-              setActivity((current) => ({
-                kind: 'tool',
-                tools: [
-                  ...current.tools.filter((tool) => tool.id !== event.data.id),
-                  {
-                    id: event.data.id,
-                    name: toSingleLineText(event.data.tool),
-                    inputSummary: toSingleLineText(formatToolInput(event.data.tool, event.data.input)),
-                  },
-                ],
-              }));
+              display.handle(event);
+              setActivity({ kind: 'tool' });
               break;
             case 'tool_result':
-              setActivity((current) => {
-                const tools = current.tools.filter((tool) => {
-                  if (event.data.completedToolIds !== undefined) {
-                    return !event.data.completedToolIds.includes(tool.id);
-                  }
-                  if (event.data.id !== undefined) {
-                    return tool.id !== event.data.id;
-                  }
-                  return tool !== current.tools.at(-1);
-                });
-                return {
-                  kind: current.kind === 'tool' && tools.length === 0 ? 'waiting' : current.kind,
-                  tools,
-                };
-              });
+              display.handle(event);
+              setActivity((current) => ({
+                kind: current.kind === 'tool' && !display.groups().some((group) => group.entries.some((entry) => entry.status === 'running'))
+                  ? 'waiting' : current.kind,
+              }));
+              break;
+            case 'tool_output':
+              display.handle(event);
+              setActivity((current) => ({ ...current }));
               break;
           }
         },
@@ -606,13 +568,16 @@ export function ConversationView({
     const submissionId = submissionCountRef.current;
     setTurn({ id: submissionId, startedAt: performance.now() });
     setElapsedSeconds(0);
-    setActivity({ kind: 'waiting', tools: [] });
+    setActivity({ kind: 'waiting' });
+    const display = new ToolActivityDisplay('silent', false, () => undefined, false);
+    setToolDisplay(display);
+    setToolView(createToolActivityViewState());
     inFlightRef.current = {
       id: submissionId,
       controller,
       isInstruction: submitMode === 'summarize' || isInstructionRequest(text),
     };
-    trackPendingWork({ controller, completion: runSubmission(text, controller, submissionId) });
+    trackPendingWork({ controller, completion: runSubmission(text, controller, submissionId, display) });
   }, [appendTranscript, runSubmission, submitMode, trackPendingWork]);
 
   /**
@@ -654,9 +619,6 @@ export function ConversationView({
   const finishRun = useCallback(async (next: ConversationExit): Promise<void> => {
     cancellingRef.current = true;
     setTurn(null);
-    // Reject any pending answer before waiting on its submission. The drain
-    // also aborts its controller, but confirmation must never hold exit open.
-    confirmationRef.current?.(false);
     // The terminal is about to belong to a selector, so the prompt stops taking
     // keys at the moment the decision is made rather than when the tree goes.
     setIsFinishing(true);
@@ -670,13 +632,25 @@ export function ConversationView({
     updateEditor(applyEditorKey(editorRef.current, { kind: 'insert', text }));
   }, [updateEditor]);
 
-  const { routeInput: routeImagePasteInput, captureClipboard: captureClipboardImage } = useImagePaste({
+  const {
+    routeInput: routeImagePasteInput,
+    flushPending: flushPendingImagePasteText,
+    captureClipboard: captureClipboardImage,
+  } = useImagePaste({
     sink: conversation,
     lang,
     insertAtCaret,
     setNotice,
     track: trackPendingWork,
     isStopped: () => exitedRef.current || cancellingRef.current,
+  });
+
+  usePaste((text) => {
+    if (exitedRef.current || cancellingRef.current) {
+      return;
+    }
+    flushPendingImagePasteText();
+    updateEditor(applyEditorKey(editorRef.current, { kind: 'paste', text }));
   });
 
   const applyLocalCommand = useCallback((command: TuiLocalCommand, text: string) => {
@@ -831,15 +805,22 @@ export function ConversationView({
       return;
     }
 
-    if (confirmationRef.current) {
-      if (input.toLowerCase() === 'y') confirmationRef.current(true);
-      else if (input.toLowerCase() === 'n' || key.return || key.escape) confirmationRef.current(false);
-      return;
-    }
-
     // A terminal pastes a screenshot as raw OSC 1337 bytes, which must be
     // recognized before any key handling or display sanitization sees them.
     if (routeImagePasteInput(input, key)) {
+      return;
+    }
+
+    if (key.ctrl && input === 'o') {
+      setToolView((state) => toggleToolActivityView(state));
+      return;
+    }
+    if (key.pageUp || key.pageDown) {
+      if (toolHistoryHeight > 1) {
+        setToolView((state) => moveToolActivityView(state,
+          toolActivityViewPage(toolDisplay, toolGroups, state, columns, Math.max(0, toolHistoryHeight - 1), toolLabels),
+          key.pageUp ? 'previous' : 'next'));
+      }
       return;
     }
 
@@ -936,8 +917,7 @@ export function ConversationView({
       return;
     }
     // Ctrl+V pastes the clipboard image, the same gesture the readline editor
-    // offered. A terminal's own text paste arrives as ordinary input and is
-    // inserted with its line breaks intact, so it never reaches this branch.
+    // offered. Terminal text pastes arrive on the separate usePaste channel.
     if (key.ctrl && input === 'v') {
       captureClipboardImage();
       return;
@@ -968,9 +948,6 @@ export function ConversationView({
           showHint={false}
           showBorder={showPromptBorder}
         />
-        {showConfirmation && (
-          <Text wrap="truncate-end">{`${toSingleLineText(confirmationMessage ?? '')} [y/N]`}</Text>
-        )}
         {showStatusLine && (
           <StatusLine
             busy={isBusy}
@@ -993,6 +970,7 @@ export function ConversationView({
         )}
         {showPromptHint && <Text dimColor wrap="truncate-end">{ui.hint}</Text>}
         {showModelRow && <Text dimColor wrap="truncate-end">{modelRow}</Text>}
+        <ToolActivityView page={toolPage} state={toolView} labels={toolLabels} height={toolHistoryHeight} />
       </Box>
     </>
   );

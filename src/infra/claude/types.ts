@@ -29,10 +29,6 @@ import type {
 
 export type { SandboxSettings };
 import type { PermissionResult } from '../../core/workflow/index.js';
-import type { ToolPermissionDecisionHandler } from '../../core/workflow/types.js';
-export type {
-  ToolPermissionDecisionRequest, ToolPermissionDecision, ToolPermissionDecisionHandler,
-} from '../../core/workflow/types.js';
 
 // Re-export PermissionResult for convenience
 export type { PermissionResult, PermissionUpdate };
@@ -130,12 +126,12 @@ export interface ClaudeCallOptions {
   agents?: Record<string, AgentDefinition>;
   /** Permission mode for tool execution (from workflow step) */
   permissionMode?: PermissionMode;
+  aiReviewPermissions?: boolean;
   /** Enable streaming mode with callback for real-time output */
   onStream?: StreamCallback;
   onActivity?: ProviderActivityCallback;
   /** Custom permission handler for interactive permission prompts */
   onPermissionRequest?: PermissionHandler;
-  onToolPermissionDecision?: ToolPermissionDecisionHandler;
   /** Custom handler for AskUserQuestion tool */
   onAskUserQuestion?: AskUserQuestionHandler;
   /** Bypass all permission checks */
@@ -148,6 +144,8 @@ export interface ClaudeCallOptions {
   outputSchema?: Record<string, unknown>;
   /** Sandbox settings for Claude SDK */
   sandbox?: SandboxSettings;
+  /** Resolved permissions.deny rules passed to Claude as flag settings */
+  denyRules?: string[];
   /** Custom path to Claude Code executable */
   pathToClaudeCodeExecutable?: string;
   imageAttachments?: ProviderImageAttachment[];
@@ -187,11 +185,11 @@ export interface ClaudeSpawnOptions {
   agents?: Record<string, AgentDefinition>;
   /** Permission mode for tool execution (TAKT abstract value, mapped to SDK value in SdkOptionsBuilder) */
   permissionMode?: PermissionMode;
+  aiReviewPermissions?: boolean;
   /** Custom permission handler for interactive permission prompts */
   onPermissionRequest?: PermissionHandler;
   /** Custom handler for AskUserQuestion tool */
   onAskUserQuestion?: AskUserQuestionHandler;
-  onToolPermissionDecision?: ToolPermissionDecisionHandler;
   /** Bypass all permission checks */
   bypassPermissions?: boolean;
   /** Anthropic API key to inject via env (bypasses CLI auth) */
@@ -204,6 +202,8 @@ export interface ClaudeSpawnOptions {
   onStderr?: (data: string) => void;
   /** Sandbox settings for Claude SDK */
   sandbox?: SandboxSettings;
+  /** Resolved permissions.deny rules passed to Claude as flag settings */
+  denyRules?: string[];
   /** Custom path to Claude Code executable */
   pathToClaudeCodeExecutable?: string;
   imageAttachments?: ProviderImageAttachment[];

@@ -113,6 +113,10 @@ function buildSettingsArg(
     }
   }
 
+  if (options.denyRules !== undefined) {
+    settings.permissions = { deny: options.denyRules };
+  }
+
   if (readonlyArtifactPaths.length > 0) {
     settings.hooks = {
       PreToolUse: [createClaudeCliReadonlyArtifactHook(readonlyArtifactPaths, options.cwd)],
@@ -144,6 +148,7 @@ async function buildSpawnArgs(
   const legacyMcpConfig = preparedMcp === undefined
     ? await prepareClaudeMcpConfig(isToolIsolated ? undefined : options.mcpServers)
     : { path: undefined, cleanup: async () => {} };
+  const permissionMode = resolveCliPermissionMode(options.permissionMode, options.bypassPermissions);
   const args: string[] = [
     '-p',
     '--verbose',
@@ -151,8 +156,11 @@ async function buildSpawnArgs(
     'stream-json',
     '--include-partial-messages',
     '--permission-mode',
-    resolveCliPermissionMode(options.permissionMode, options.bypassPermissions),
+    permissionMode,
   ];
+  if (permissionMode === 'bypassPermissions') {
+    args.push('--allow-dangerously-skip-permissions');
+  }
   if (options.model) {
     args.push('--model', options.model);
   }

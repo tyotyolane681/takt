@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import * as childProcess from 'node:child_process';
@@ -27,6 +27,7 @@ const {
   mockGetProvider,
   mockRunAgent,
   mockResolveConfigValueWithSource,
+  mockCloseOpenCodeServersForExternalDirectories,
 } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { EventEmitter: EE } = require('node:events') as typeof import('node:events');
@@ -36,14 +37,18 @@ const {
   class MockWorkflowEngine extends EE {
     static lastInstance: MockWorkflowEngine;
     static nextRunImpl: ((instance: MockWorkflowEngine) => Promise<{ status: string; iteration: number }>) | undefined;
+    static nextOpenCodeExternalDirectories: readonly string[] | undefined;
     readonly receivedOptions: Record<string, unknown>;
     readonly receivedConfig: WorkflowConfig;
+    openCodeExternalDirectories: readonly string[] = [];
     currentResumePoint: unknown;
 
     constructor(config: WorkflowConfig, _cwd: string, _task: string, options: Record<string, unknown>) {
       super();
       this.receivedConfig = config;
       this.receivedOptions = options;
+      this.openCodeExternalDirectories = MockWorkflowEngine.nextOpenCodeExternalDirectories ?? [];
+      MockWorkflowEngine.nextOpenCodeExternalDirectories = undefined;
       MockWorkflowEngine.lastInstance = this;
       this.currentResumePoint = undefined;
     }
@@ -92,6 +97,7 @@ const {
     mockGetProvider: vi.fn(),
     mockRunAgent: vi.fn(),
     mockResolveConfigValueWithSource: vi.fn(),
+    mockCloseOpenCodeServersForExternalDirectories: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -179,6 +185,11 @@ vi.mock('../infra/claude/query-manager.js', () => ({
   interruptAllQueries: vi.fn(),
 }));
 
+vi.mock('../infra/opencode/server-pool.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../infra/opencode/server-pool.js')>()),
+  closeOpenCodeServersForExternalDirectories: mockCloseOpenCodeServersForExternalDirectories,
+}));
+
 vi.mock('../infra/config/index.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   loadPersonaSessions: vi.fn().mockReturnValue({}),
@@ -217,10 +228,12 @@ vi.mock('../shared/ui/index.js', () => ({
   success: vi.fn(),
   status: vi.fn(),
   blankLine: vi.fn(),
-  StreamDisplay: vi.fn().mockImplementation(() => ({
-    createHandler: vi.fn().mockReturnValue(vi.fn()),
-    flush: vi.fn(),
-  })),
+  StreamDisplay: vi.fn().mockImplementation(function () {
+    return {
+      createHandler: vi.fn().mockReturnValue(vi.fn()),
+      flush: vi.fn(),
+    };
+  }),
 }));
 
 vi.mock('../infra/fs/index.js', () => ({
@@ -371,6 +384,7 @@ describe('executeWorkflow structuredCaller injection', () => {
     mockGetProvider.mockReturnValue({ supportsStructuredOutput: false });
     mockResolvedProviderModel('cursor', undefined);
     MockWorkflowEngine.nextRunImpl = undefined;
+    MockWorkflowEngine.nextOpenCodeExternalDirectories = undefined;
     cleanupDirs = [];
     projectCwd = mkdtempSync(join(tmpdir(), 'takt-structured-caller-project-'));
     cleanupDirs.push(projectCwd);
@@ -435,6 +449,30 @@ describe('executeWorkflow structuredCaller injection', () => {
       resolvedExecution: expect.objectContaining({ provider: 'cursor' }),
     }));
     expect(runOptions).not.toHaveProperty('outputSchema');
+  });
+
+  it('外部にある run context の OpenCode server を run 完了時に閉じる', async () => {
+    const runPathsDirectory = mkdtempSync(join(tmpdir(), 'takt-structured-caller-runs-'));
+    cleanupDirs.push(runPathsDirectory);
+    const contextDirectory = join(runPathsDirectory, 'external-context-run', 'context');
+    mkdirSync(contextDirectory, { recursive: true });
+    const resolvedContextDirectory = realpathSync(contextDirectory);
+    MockWorkflowEngine.nextOpenCodeExternalDirectories = [resolvedContextDirectory];
+    MockWorkflowEngine.nextRunImpl = async (instance) => {
+      const result = await instance.run();
+      rmSync(contextDirectory, { recursive: true, force: true });
+      return result;
+    };
+
+    await executeWorkflow(makeConfig(), 'task', projectCwd, {
+      projectCwd,
+      reportDirName: 'external-context-run',
+      runPathsDirectory,
+    });
+
+    expect(mockCloseOpenCodeServersForExternalDirectories).toHaveBeenCalledWith([
+      resolvedContextDirectory,
+    ]);
   });
 
   it('PR実行APIが同じPRとcloneのcontextおよび方式をengineへ渡す', async () => {

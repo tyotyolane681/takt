@@ -51,12 +51,15 @@ vi.mock('../infra/config/paths.js', async (importOriginal) => ({
 
 vi.mock('../shared/ui/index.js', () => ({
   info: vi.fn(),
+  warn: vi.fn(),
   error: vi.fn(),
   blankLine: vi.fn(),
-  StreamDisplay: vi.fn().mockImplementation(() => ({
-    createHandler: vi.fn(() => vi.fn()),
-    flush: vi.fn(),
-  })),
+  StreamDisplay: vi.fn().mockImplementation(function () {
+    return {
+      createHandler: vi.fn(() => vi.fn()),
+      flush: vi.fn(),
+    };
+  }),
 }));
 
 vi.mock('../features/interactive/pipedSummaryInput.js', async () => {

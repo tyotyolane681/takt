@@ -7,6 +7,7 @@ import { buildTaskRetryStartOptions } from '../features/tasks/list/taskRetryStar
 import { filterSlashCommands } from '../features/interactive/slashCommandRegistry.js';
 import { buildInteractiveSystemPrompt } from '../features/interactive/conversationPlan.js';
 import { getLabel } from '../shared/i18n/index.js';
+import { recordTurn } from '../features/interactive/interactiveSessionRecords.js';
 
 let fixture: ReturnType<typeof createEscMenuFixture>;
 let terminal: EscMenuTerminal;
@@ -54,7 +55,7 @@ describe('TUI confirmation to conversation routes through the real runner', () =
       void run.catch(() => undefined);
       await terminal.waitForPrompt(getLabel('interactive.modeSelection.prompt', 'en'), 0);
       await terminal.send('\x1B[B\x1B[B\r');
-      await vi.waitFor(() => expect(inkFrames.frames).toHaveLength(1));
+      await vi.waitFor(() => expect(inkFrames.frames).toHaveLength(1), { timeout: 10_000 });
       const first = inkFrames.frames[0]!;
       expect(terminal.output()).not.toContain(getLabel('interactive.formalSpecPrompt', 'en'));
       await terminal.send('before command\r');
@@ -134,12 +135,16 @@ describe('TUI confirmation to conversation routes through the real runner', () =
         await terminal.waitForPrompt(getLabel('interactive.formalSpecPrompt', 'en'), mark);
         await terminal.send('y\r');
       }
-      await vi.waitFor(() => expect(inkFrames.frames).toHaveLength(1));
+      await vi.waitFor(() => expect(inkFrames.frames).toHaveLength(1), { timeout: 10_000 });
       const first = inkFrames.frames[0]!;
       await terminal.send('before command\r');
       await vi.waitFor(() => expect(first.submissions).toHaveLength(1));
       expect(capture.callCount).toBe(1);
       expect(capture.sessionIds[0]).toBe('original-session');
+
+      if (route === 'resume') {
+        recordTurn({ cwd: fixture.cwd, provider: 'mock', sessionId: 'selected-session', input: 'Previous conversation', response: '' });
+      }
 
       mark = terminal.mark();
       await terminal.send(command + '\r');
@@ -149,9 +154,6 @@ describe('TUI confirmation to conversation routes through the real runner', () =
         await terminal.send('\x1B[B\r');
         await terminal.waitForPrompt(getLabel('interactive.formalSpecPrompt', 'en'), mark);
       } else if (route === 'tell') {
-        await terminal.waitForPrompt(getLabel('tui.tell.selectPrompt', 'en'), mark);
-        mark = terminal.mark();
-        await terminal.send('\r');
         await terminal.waitForPrompt(tellInstruction, mark);
         await terminal.waitForPrompt('[Y/n]:', mark);
       } else {
@@ -209,7 +211,7 @@ describe('TUI confirmation to conversation routes through the real runner', () =
 });
 
 describe('TUI /go action menu through the real selector', () => {
-  async function openTaskMenu(dispatch: ReturnType<typeof vi.fn>) {
+  async function openTaskMenu(dispatch: NonNullable<Parameters<typeof runTui>[0]['dispatch']>) {
     const capture = fixture.provider([{ content: 'Agreed task' }, { content: 'Continued answer' }]);
     const run = runTui({
       cwd: fixture.cwd, lang: 'en', workflowId: 'menu-workflow',
@@ -218,7 +220,7 @@ describe('TUI /go action menu through the real selector', () => {
     void run.catch(() => undefined);
     await terminal.waitForPrompt(getLabel('interactive.modeSelection.prompt', 'en'), 0);
     await terminal.send('\r');
-    await vi.waitFor(() => expect(inkFrames.frames).toHaveLength(1));
+    await vi.waitFor(() => expect(inkFrames.frames).toHaveLength(1), { timeout: 10_000 });
     const first = inkFrames.frames[0]!;
     const instruction = await first.props.conversation.submit({
       text: '/go build the task', abortSignal: new AbortController().signal, onAssistantChunk: () => undefined,

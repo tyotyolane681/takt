@@ -31,6 +31,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MERGE_CI_TARGETS, prepareMergeCiRecovery } from './prepare-merge-ci-recovery.mjs';
 import { PHASE_AWARENESS_TARGET, preparePhaseAwareness } from './prepare-phase-awareness.mjs';
+import { ADJUDICATOR_TARGETS, buildAdjudicatorFixture } from '../adjudicator-no-fix-cases.mjs';
+import { REPAIR_STRATEGY_TARGET } from '../repair-strategy-cases.mjs';
+import { prepareRepairStrategy } from './prepare-repair-strategy.mjs';
 
 const TASK_MARKER = '@@PROMPTFOO_TASK@@';
 const PREV_MARKER = '@@PROMPTFOO_PREVIOUS_RESPONSE@@';
@@ -49,6 +52,11 @@ export function assertRequiredFacetSnapshots(id, requiredFacetKinds, sourcePaths
 // id doubles as the prompt basename (normal targets use phase1; loop monitors use phase3).
 // mutable targets run in a disposable copy under eval/.work/<id>.
 const TARGETS = [
+  ...ADJUDICATOR_TARGETS.map((id) => ({
+    id, workflow: 'peer-review', step: 'review-adjudication',
+    fixture: `eval/.work/${id}`, projectFromFixture: true,
+    requiredFacetKinds: ['policies', 'knowledge'], promptExtension: 'j2',
+  })),
   ...[
     ['rt', 'security-review'],
     ['rc', 'coding-review'],
@@ -279,6 +287,206 @@ const TARGETS = [
     fixture: 'eval/fixtures/review-external-confirmation/basis-not-applicable',
     projectFromFixture: true,
     promptExtension: 'j2',
+  },
+  {
+    id: 'spec-deviation-grounded-generic-ja',
+    workflow: 'final-gate',
+    step: 'supervise',
+    fixture: 'eval/fixtures/spec-deviation/grounded',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'ja',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-grounded-peer-ja',
+    workflow: 'peer-review',
+    step: 'final-gate',
+    fixture: 'eval/fixtures/spec-deviation/grounded',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'ja',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-grounded-generic-en',
+    workflow: 'final-gate',
+    step: 'supervise',
+    fixture: 'eval/fixtures/spec-deviation/grounded',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'en',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-grounded-peer-en',
+    workflow: 'peer-review',
+    step: 'final-gate',
+    fixture: 'eval/fixtures/spec-deviation/grounded',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'en',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-reinterpretation-generic-ja',
+    workflow: 'final-gate',
+    step: 'supervise',
+    fixture: 'eval/fixtures/spec-deviation/reinterpretation',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'ja',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-reinterpretation-peer-ja',
+    workflow: 'peer-review',
+    step: 'final-gate',
+    fixture: 'eval/fixtures/spec-deviation/reinterpretation',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'ja',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-reinterpretation-generic-en',
+    workflow: 'final-gate',
+    step: 'supervise',
+    fixture: 'eval/fixtures/spec-deviation/reinterpretation',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'en',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-reinterpretation-peer-en',
+    workflow: 'peer-review',
+    step: 'final-gate',
+    fixture: 'eval/fixtures/spec-deviation/reinterpretation',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'en',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-ungrounded-generic-ja',
+    workflow: 'final-gate',
+    step: 'supervise',
+    fixture: 'eval/fixtures/spec-deviation/ungrounded',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'ja',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-ungrounded-peer-ja',
+    workflow: 'peer-review',
+    step: 'final-gate',
+    fixture: 'eval/fixtures/spec-deviation/ungrounded',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'ja',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-ungrounded-generic-en',
+    workflow: 'final-gate',
+    step: 'supervise',
+    fixture: 'eval/fixtures/spec-deviation/ungrounded',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'en',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-ungrounded-peer-en',
+    workflow: 'peer-review',
+    step: 'final-gate',
+    fixture: 'eval/fixtures/spec-deviation/ungrounded',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'en',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-clean-generic-ja',
+    workflow: 'final-gate',
+    step: 'supervise',
+    fixture: 'eval/fixtures/spec-deviation/clean',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'ja',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-clean-peer-ja',
+    workflow: 'peer-review',
+    step: 'final-gate',
+    fixture: 'eval/fixtures/spec-deviation/clean',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'ja',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-clean-generic-en',
+    workflow: 'final-gate',
+    step: 'supervise',
+    fixture: 'eval/fixtures/spec-deviation/clean',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'en',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-clean-peer-en',
+    workflow: 'peer-review',
+    step: 'final-gate',
+    fixture: 'eval/fixtures/spec-deviation/clean',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'en',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-other-unmet-generic-ja',
+    workflow: 'final-gate',
+    step: 'supervise',
+    fixture: 'eval/fixtures/spec-deviation/other-unmet',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'ja',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-other-unmet-peer-ja',
+    workflow: 'peer-review',
+    step: 'final-gate',
+    fixture: 'eval/fixtures/spec-deviation/other-unmet',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'ja',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-other-unmet-generic-en',
+    workflow: 'final-gate',
+    step: 'supervise',
+    fixture: 'eval/fixtures/spec-deviation/other-unmet',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'en',
+    reportFile: 'summary.md',
+  },
+  {
+    id: 'spec-deviation-other-unmet-peer-en',
+    workflow: 'peer-review',
+    step: 'final-gate',
+    fixture: 'eval/fixtures/spec-deviation/other-unmet',
+    projectFromFixture: true,
+    promptExtension: 'j2',
+    language: 'en',
+    reportFile: 'summary.md',
   },
   {
     id: 'supervise-external-confirmation-generic',
@@ -799,6 +1007,7 @@ const ARTIFACT_HANDOFF_TARGET = 'review-artifact-input-handoff';
 export const PREPARE_TARGET_IDS = Object.freeze([
   ...TARGETS.map(({ id }) => id),
   ARTIFACT_HANDOFF_TARGET,
+  REPAIR_STRATEGY_TARGET,
   PHASE_AWARENESS_TARGET,
   ...MERGE_CI_TARGETS,
 ]);
@@ -999,6 +1208,7 @@ async function main() {
       throw new Error(`Unknown target "${id}". Available: ${PREPARE_TARGET_IDS.join(', ')}`);
     }
   }
+  if (requested.includes(REPAIR_STRATEGY_TARGET)) await prepareRepairStrategy();
   if (requested.includes(PHASE_AWARENESS_TARGET)) preparePhaseAwareness();
   if (requested.includes(ARTIFACT_HANDOFF_TARGET)) {
     execFileSync(process.execPath, ['eval/scripts/prepare-review-artifact-input-handoff.mjs'], {
@@ -1008,6 +1218,10 @@ async function main() {
   }
   await prepareMergeCiRecovery(requested.filter((id) => MERGE_CI_TARGETS.includes(id)));
   const targets = requested.length > 0 ? TARGETS.filter((t) => requested.includes(t.id)) : TARGETS;
+
+  for (const { id, fixture } of targets) {
+    if (ADJUDICATOR_TARGETS.includes(id)) buildAdjudicatorFixture(resolve(repoRoot, fixture), id.at(-1));
+  }
 
   const preparedDirs = new Set();
 
@@ -1261,6 +1475,9 @@ async function main() {
         .replaceAll(TASK_MARKER, '{{task}}')
         .replaceAll(PREV_MARKER, '{{previous_response}}');
       writeFileSync(join(outDir, `${id}.phase2.md`), reportPrompt);
+      if (promptExtension === 'j2') {
+        writeFileSync(join(outDir, `${id}.phase2.j2`), reportPrompt);
+      }
     }
 
     const targetName = companionName ?? (monitorCycle ? `[${monitorCycle.join(' -> ')}] monitor` : stepName);

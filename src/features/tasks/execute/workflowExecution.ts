@@ -1,3 +1,4 @@
+import { isQuietMode } from '../../../shared/context.js';
 import { cacciaEffect } from '../../caccia/system-effect.js';
 import { resolveTaskPrExecutionContext } from './prExecutionContext.js';
 import { WorkflowEngine, createDenyAskUserQuestionHandler } from '../../../core/workflow/index.js';
@@ -8,7 +9,7 @@ import { ManagedProviderInstallRequiredError } from '../../../infra/managed-prov
 import { join } from 'node:path';
 import { resolveConfigValues } from '../../../infra/config/resolveConfigValue.js';
 import { getLabel } from '../../../shared/i18n/index.js';
-import type { WorkflowConfig, WorkflowStep } from '../../../core/models/index.js';
+import type { AgentResponse, WorkflowConfig, WorkflowStep } from '../../../core/models/index.js';
 import type { WorkflowExecutionResult, WorkflowExecutionOptions } from './types.js';
 import { createDefaultSystemStepServices } from '../../../infra/workflow/system/DefaultSystemStepServices.js';
 import { createDefaultStructuredOutputNormalizers } from '../../../infra/workflow/structured-output/followup-task-normalizer.js';
@@ -91,6 +92,7 @@ import { LiveInterventionFileStore } from '../../../infra/workflow/live-interven
 import { createOutputFns } from './outputFns.js';
 import { validateWorkflowReportReferences } from '../../../core/workflow/instruction/report-reference-validation.js';
 import { sanitizeTerminalText } from '../../../shared/utils/text.js';
+import { closeOpenCodeServersForExternalDirectories } from '../../../infra/opencode/server-pool.js';
 
 export type { WorkflowExecutionResult, WorkflowExecutionOptions };
 
@@ -236,6 +238,7 @@ async function executeWorkflowInternal(
       workflowConfig,
       options.projectCwd,
       options.workflowResourceRoot,
+      options.workflowSystemCommandsPolicy,
     ),
   );
   const preparedBundle = prepareWorkflowExecutionBundle({
@@ -356,7 +359,10 @@ async function executeWorkflowInternal(
     });
   const phase1ProcessSafetyByStep = resolvePhase1ProcessSafetyByStep(bootstrap.effectiveWorkflowConfig, parentRunPid);
   let engine: WorkflowEngine | null = null;
+  let openCodeExternalDirectories: readonly string[] | undefined;
   let eventBridge: WorkflowExecutionEventBridge | undefined;
+  let cacciaFailure: { step: string; reason: string } | undefined;
+  let activeStep: WorkflowStep;
   let runExecution: Pick<WorkflowRunExecutionHandle, 'run'> | undefined;
   let runExecutionControl: WorkflowRunExecutionControl | undefined;
   let abortHandler: AbortHandler | undefined;
@@ -444,6 +450,8 @@ async function executeWorkflowInternal(
       engine = new WorkflowEngine(bootstrap.effectiveWorkflowConfig, cwd, task, {
         abortSignal: executionControl.signal,
         onStream: handleProviderStream,
+        toolDisplayMode: bootstrap.toolDisplayMode,
+        streamQuiet: isQuietMode(),
         onProviderStream: (context, event) => {
           bootstrap.providerEventLogger.logEvent(context, event);
         },
@@ -517,6 +525,7 @@ async function executeWorkflowInternal(
         resumePoint: options.resumePoint,
         restartPoint: options.restartPoint,
         resumeSource: artifactResumeSource,
+        sourceResumePoint: options.sourceResumePoint,
         operationJournal: bootstrap.operationJournal,
         reportDirName: bootstrap.runSlug,
         ...(options.runPathsDirectory === undefined ? {} : { runPathsDirectory: options.runPathsDirectory }),
@@ -530,27 +539,45 @@ async function executeWorkflowInternal(
         mergeMethod: options.mergeMethod,
         prGitOperations: prExecution.prGitOperations,
         phase1ProcessSafetyByStep,
-        systemStepServicesFactory: (serviceOptions) => createDefaultSystemStepServices({
-          ...serviceOptions,
-          ...gitSafety,
-          ...(options.cacciaExecutionSource === undefined ? {} : { cacciaService: {
-            execute: (prNumber) => cacciaEffect({
-              ...serviceOptions, ...gitSafety, prContext,
-              prMergePushRecorder: options.prMergePushRecorder,
-              gitProvider: runContext?.gitProvider,
-              outputMode: options.outputMode, taskPrefix: options.taskPrefix,
-              eventSink: options.eventSink,
-              taskColorIndex: options.taskColorIndex, taskDisplayLabel: options.taskDisplayLabel,
-            }, prNumber),
-          } }),
-          ...(runContext?.gitProvider !== undefined ? { gitProvider: runContext.gitProvider } : {}),
-        }),
+        systemStepServicesFactory: (serviceOptions) => {
+          const stepName = activeStep.name;
+          return createDefaultSystemStepServices({
+            ...serviceOptions,
+            runPaths: bootstrap.runPaths,
+            ...gitSafety,
+            ...(options.cacciaExecutionSource === undefined ? {} : { cacciaService: {
+              execute: async (prNumber) => {
+                const result = await cacciaEffect({
+                  ...serviceOptions, ...gitSafety, prContext,
+                  prMergePushRecorder: options.prMergePushRecorder,
+                  gitProvider: runContext?.gitProvider,
+                  outputMode: options.outputMode, taskPrefix: options.taskPrefix,
+                  eventSink: options.eventSink,
+                  taskColorIndex: options.taskColorIndex, taskDisplayLabel: options.taskDisplayLabel,
+                }, prNumber);
+                cacciaFailure = result.failed === true && typeof result.error === 'string'
+                  ? { step: stepName, reason: result.error } : undefined;
+                return result;
+              },
+            } }),
+            ...(runContext?.gitProvider !== undefined ? { gitProvider: runContext.gitProvider } : {}),
+          });
+        },
         workflowCallResolver,
         workflowBundleResourceRoot: executionBundle.resourceRoot,
       });
+      openCodeExternalDirectories = engine.openCodeExternalDirectories;
 
-      engine.on('step:start', (_step, _iteration, _instruction, _provider, _workflowName,
+      engine.on('step:start', (startedStep: WorkflowStep, _iteration, _instruction, _provider, _workflowName,
         _resumeStepName, _stepIteration, stack) => {
+        activeStep = startedStep;
+        if (cacciaFailure !== undefined) {
+          const reference = `${cacciaFailure.step}.caccia.error`;
+          const reportsFailure = startedStep.effects?.some((effect) => effect.type === 'comment_pr'
+            && [...effect.body.matchAll(/\{effect:([^}]+)\}/g)]
+              .some((match) => match[1]!.replaceAll(':', '.') === reference));
+          if (!reportsFailure) cacciaFailure = undefined;
+        }
         let workflow = executionBundle.rootWorkflow;
         let steps: readonly WorkflowStep[] = workflow.steps;
         for (const [index, frame] of stack.entries()) {
@@ -570,7 +597,12 @@ async function executeWorkflowInternal(
         }
       });
 
+      engine.on('step:complete', (_step: WorkflowStep, response: AgentResponse) => {
+        if (response.systemWaitTimeout) cacciaFailure = undefined;
+      });
+
       eventBridge = bindWorkflowExecutionEvents({
+        getCacciaFailureReason: () => cacciaFailure?.reason,
         runtimeReportDiagnostics,
         engine,
         workflowConfig: bootstrap.effectiveWorkflowConfig,
@@ -579,6 +611,8 @@ async function executeWorkflowInternal(
         out: bootstrap.out,
         prefixWriter: bootstrap.prefixWriter,
         displayRef: bootstrap.displayRef,
+        toolDisplayMode: bootstrap.toolDisplayMode,
+        flushStream: bootstrap.flushStream,
         handlerRef: bootstrap.handlerRef,
         usageEventLogger: bootstrap.usageEventLogger,
         analyticsEmitter: bootstrap.analyticsEmitter,
@@ -607,6 +641,7 @@ async function executeWorkflowInternal(
         success: finalState.status === 'completed',
         workflowHasCaccia: [...startedWorkflows].some((workflow) => hasCacciaEffect(workflow.steps)),
         reason: eventBridge.state.failure?.error ?? eventBridge.state.abortReason,
+        ...(eventBridge.state.abortKind === undefined ? {} : { abortKind: eventBridge.state.abortKind }),
         lastStep: eventBridge.state.failure?.step ?? eventBridge.state.lastStepName,
         lastMessage: eventBridge.state.lastStepContent,
         runDirectory: bootstrap.runPaths.runRootAbs,
@@ -720,8 +755,15 @@ async function executeWorkflowInternal(
       finalizationIssues.push(...eventBridge.getFinalizationIssues());
     }
     captureError(cleanupErrors, () => bootstrap.warnIfAutoStrategyUnused());
+    captureError(cleanupErrors, () => bootstrap.flushStream());
     captureError(cleanupErrors, () => bootstrap.prefixWriter?.flush());
     captureError(cleanupErrors, () => abortHandler?.cleanup());
+    const externalDirectories = openCodeExternalDirectories;
+    if (externalDirectories !== undefined) {
+      await captureAsyncError(cleanupErrors, async () => {
+        await closeOpenCodeServersForExternalDirectories(externalDirectories);
+      });
+    }
     await captureAsyncError(
       cleanupErrors,
       () => bootstrap.observabilityHandle.shutdown(),

@@ -39,6 +39,7 @@ vi.mock('node:fs', () => ({
     realpathSync: vi.fn((value: string) => value),
     existsSync: vi.fn(),
     rmSync: vi.fn(),
+    readdirSync: vi.fn(),
     unlinkSync: vi.fn(),
     accessSync: vi.fn(),
     constants: { W_OK: 2 },
@@ -55,6 +56,7 @@ vi.mock('node:fs', () => ({
   realpathSync: vi.fn((value: string) => value),
   existsSync: vi.fn(),
   rmSync: vi.fn(),
+  readdirSync: vi.fn(),
   unlinkSync: vi.fn(),
   accessSync: vi.fn(),
   constants: { W_OK: 2 },
@@ -95,6 +97,8 @@ import {
   cleanupOrphanedClone,
 } from '../infra/task/clone.js';
 import {
+  cloneAndIsolate,
+  cloneAndIsolateAbortable,
   fetchRemoteBranchIntoIsolatedClone,
   fetchRemoteBranchIntoIsolatedCloneAbortable,
 } from '../infra/task/clone-exec.js';
@@ -107,6 +111,9 @@ const mockResolveConfigValue = vi.mocked(resolveConfigValue);
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(fs.lstatSync).mockImplementation(() => {
+    throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+  });
+  vi.mocked(fs.readdirSync).mockImplementation(() => {
     throw Object.assign(new Error('missing'), { code: 'ENOENT' });
   });
   let randomByteValue = 1;
@@ -131,6 +138,11 @@ beforeEach(() => {
   mockResolveConfigValue.mockReturnValue(undefined);
 });
 
+function isCloneCommand(args: string[]): boolean {
+  const commandIndex = args[0] === '-c' ? 2 : 0;
+  return args[commandIndex] === 'clone';
+}
+
 function mockGitSpawn(
   resolveExitCode: (args: string[]) => number,
 ): void {
@@ -153,6 +165,23 @@ function mockGitSpawn(
     return child as never;
   });
 }
+
+it.each(['sync', 'abortable'] as const)('disables commit-graph reads for the reference clone process (%s)', async (mode) => {
+  mockGitSpawn(() => 0);
+
+  if (mode === 'sync') {
+    cloneAndIsolate('/project', '/clones/graph', 'main');
+  } else {
+    await cloneAndIsolateAbortable('/project', '/clones/graph', 'main');
+  }
+
+  const calls = mode === 'sync' ? mockExecFileSync.mock.calls : mockSpawn.mock.calls;
+  const cloneCall = calls.find((call) => isCloneCommand(call[1] as string[]));
+  expect(cloneCall?.[1]).toEqual([
+    '-c', 'core.commitGraph=false', 'clone', '--reference', '/project', '--dissociate',
+    '--no-local', '--branch', 'main', '/project', '/clones/graph',
+  ]);
+});
 
 describe.each(['sync', 'abortable'] as const)('generated metadata publication retry (%s)', (mode) => {
   const branch = 'takt/1465/fix-login-bug';
@@ -289,8 +318,8 @@ it.each(['sync', 'abortable'] as const)('keeps an explicit-branch clone outside 
   vi.mocked(fs.renameSync).mockImplementationOnce(() => { throw failure; });
 
   await expect(Promise.resolve().then(() => mode === 'sync'
-    ? createSharedClone('/project', { worktree: '/clones/explicit', branch: 'feature/explicit', baseBranch: 'main' })
-    : createSharedCloneAbortable('/project', { worktree: '/clones/explicit', branch: 'feature/explicit', baseBranch: 'main' })))
+    ? createSharedClone('/project', { worktree: '/clones/explicit', taskSlug: 'explicit', branch: 'feature/explicit', baseBranch: 'main' })
+    : createSharedCloneAbortable('/project', { worktree: '/clones/explicit', taskSlug: 'explicit', branch: 'feature/explicit', baseBranch: 'main' })))
     .rejects.toBe(failure);
 
   expect(fs.rmSync).not.toHaveBeenCalledWith('/clones/explicit', expect.anything());
@@ -321,7 +350,7 @@ describe('worktree reference resolution', () => {
         return 'main\n';
       }
       if (argsArr[0] === 'fetch') return Buffer.from('');
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         if (argsArr.includes('--reference')) {
           throw new Error('fatal: reference repository is a linked checkout and is not supported yet');
         }
@@ -354,6 +383,7 @@ describe('worktree reference resolution', () => {
     });
 
     expect(cloneCalls).toHaveLength(1);
+    expect(cloneCalls[0]?.[0]).toBe('clone');
     expect(cloneCalls[0]).not.toContain('--reference');
     expect(cloneCalls[0]).not.toContain('--dissociate');
     expect(cloneCalls[0]).toContain('--no-local');
@@ -392,7 +422,7 @@ describe('worktree reference resolution', () => {
       child.pid = 12345;
       child.kill = vi.fn();
 
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         if (argsArr.includes('--reference')) {
           child.stderr.emit('data', 'fatal: reference repository is a linked checkout and is not supported yet');
           setImmediate(() => {
@@ -417,6 +447,7 @@ describe('worktree reference resolution', () => {
     });
 
     expect(cloneCalls).toHaveLength(1);
+    expect(cloneCalls[0]?.[0]).toBe('clone');
     expect(cloneCalls[0]).not.toContain('--reference');
     expect(cloneCalls[0]).not.toContain('--dissociate');
     expect(cloneCalls[0]).toContain('--no-local');
@@ -443,7 +474,7 @@ describe('cloneAndIsolate git config propagation', () => {
       }
 
       // git clone
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         return Buffer.from('');
       }
 
@@ -454,7 +485,7 @@ describe('cloneAndIsolate git config propagation', () => {
 
       // git config --local <key> (reading from source repo)
       if (argsArr[0] === 'config' && argsArr[1] === '--local') {
-        const key = argsArr[2];
+        const key = argsArr[2]!;
         if (key in localConfigs) {
           return Buffer.from(localConfigs[key] + '\n');
         }
@@ -468,7 +499,7 @@ describe('cloneAndIsolate git config propagation', () => {
 
       // git config <key> <value> (writing to clone)
       if (argsArr[0] === 'config' && argsArr.length === 3 && argsArr[1] !== '--local') {
-        configSetCalls.push({ key: argsArr[1], value: argsArr[2] });
+        configSetCalls.push({ key: argsArr[1]!, value: argsArr[2]! });
         return Buffer.from('');
       }
 
@@ -561,7 +592,7 @@ describe('branch and worktree path formatting with issue numbers', () => {
       }
 
       // git clone
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         const clonePath = argsArr[argsArr.length - 1];
         return Buffer.from(`Cloning into '${clonePath}'...`);
       }
@@ -721,7 +752,7 @@ describe('resolveBaseBranch', () => {
       if (argsArr[0] === 'rev-parse' && argsArr[1] === '--abbrev-ref') {
         return 'main\n';
       }
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config') {
         if (argsArr[1] === '--local') throw new Error('not set');
@@ -757,7 +788,7 @@ describe('resolveBaseBranch', () => {
       if (argsArr[0] === 'rev-parse' && argsArr[1] === '--abbrev-ref') {
         return 'feature-branch\n';
       }
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         cloneCalls.push(argsArr);
         return Buffer.from('');
       }
@@ -795,7 +826,7 @@ describe('resolveBaseBranch', () => {
       if (argsArr[0] === 'symbolic-ref' && argsArr[1] === 'refs/remotes/origin/HEAD') {
         return 'refs/remotes/origin/develop\n';
       }
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         cloneCalls.push(argsArr);
         return Buffer.from('');
       }
@@ -888,7 +919,7 @@ describe('resolveBaseBranch', () => {
       if (argsArr[0] === 'rev-parse' && argsArr[1] === '--abbrev-ref') {
         return 'main\n';
       }
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config') {
         if (argsArr[1] === '--local') throw new Error('not set');
@@ -915,7 +946,7 @@ describe('resolveBaseBranch', () => {
       if (argsArr[0] === 'rev-parse' && argsArr[1] === '--abbrev-ref') {
         return 'main\n';
       }
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config') {
         if (argsArr[1] === '--local') throw new Error('not set');
@@ -939,7 +970,7 @@ describe('clone submodule arguments', () => {
       if (argsArr[0] === 'rev-parse' && argsArr[1] === '--abbrev-ref' && argsArr[2] === 'HEAD') {
         return 'main\n';
       }
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         cloneCalls.push(argsArr);
         return Buffer.from('');
       }
@@ -1018,7 +1049,7 @@ describe('clone submodule arguments', () => {
     });
 
     expect(cloneCalls).toHaveLength(1);
-    expect(cloneCalls[0].some((arg) => arg.startsWith('--recurse-submodules'))).toBe(false);
+    expect(cloneCalls[0]!.some((arg) => arg.startsWith('--recurse-submodules'))).toBe(false);
     const creatingLog = mockLogInfo.mock.calls.find((call) =>
       typeof call[0] === 'string' && call[0].includes('Creating shared clone')
     );
@@ -1045,7 +1076,7 @@ describe('branchExists remote tracking branch fallback', () => {
         throw new Error('branch not found');
       }
 
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         cloneCalls.push(argsArr);
         return Buffer.from('');
       }
@@ -1372,7 +1403,7 @@ describe('branchExists remote tracking branch fallback', () => {
         }
         throw new Error('branch not found');
       }
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config') {
         if (argsArr[1] === '--local') throw new Error('not set');
@@ -1553,7 +1584,7 @@ describe('branchExists remote tracking branch fallback', () => {
         }
         throw new Error('branch not found');
       }
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config') {
         if (argsArr[1] === '--local') throw new Error('not set');
@@ -1651,7 +1682,7 @@ describe('branchExists remote tracking branch fallback', () => {
         throw new Error('branch not found');
       }
 
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         cloneCalls.push(argsArr);
         return Buffer.from('');
       }
@@ -1713,7 +1744,7 @@ describe('branchExists remote tracking branch fallback', () => {
         throw new Error('branch not found');
       }
 
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         cloneCalls.push([...argsArr]);
         return Buffer.from('');
       }
@@ -1772,7 +1803,7 @@ describe('branchExists remote tracking branch fallback', () => {
         throw new Error('branch not found');
       }
 
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         cloneCalls.push([...argsArr]);
         return Buffer.from('');
       }
@@ -1894,7 +1925,7 @@ describe('prefetch existing branch on origin before clone (#557)', () => {
         throw new Error(`fatal: ${hiddenProjectDir} was not found`);
       }
       if (argsArr[0] === 'fetch') return Buffer.from('');
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config') {
         if (argsArr[1] === '--local') throw new Error('not set');
@@ -1989,7 +2020,7 @@ describe('prefetch existing branch on origin before clone (#557)', () => {
         opSequence.push('project-fetch');
         return Buffer.from('');
       }
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         opSequence.push('clone');
         return Buffer.from('');
       }
@@ -2044,7 +2075,7 @@ describe('prefetch existing branch on origin before clone (#557)', () => {
         opSequence.push(`project-fetch:${argsArr[3]}`);
         return Buffer.from('');
       }
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         opSequence.push('clone');
         return Buffer.from('');
       }
@@ -2139,7 +2170,7 @@ describe('autoFetch: true — fetch, rev-parse origin/<branch>, reset --hard', (
       }
 
       // git clone
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
 
       // git remote remove origin
       if (argsArr[0] === 'remote') return Buffer.from('');
@@ -2192,6 +2223,7 @@ describe('shallow clone fallback', () => {
   function setupShallowCloneMock(options: {
     shallowError: boolean;
     otherError?: string;
+    shallowMessage?: string;
   }): { cloneCalls: string[][] } {
     const cloneCalls: string[][] = [];
 
@@ -2208,13 +2240,13 @@ describe('shallow clone fallback', () => {
       }
 
       // git clone
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         cloneCalls.push([...argsArr]);
         const hasReference = argsArr.includes('--reference');
 
         if (hasReference && options.shallowError) {
           const err = new Error('clone failed');
-          (err as unknown as { stderr: Buffer }).stderr = Buffer.from('fatal: reference repository is shallow');
+          (err as unknown as { stderr: Buffer }).stderr = Buffer.from(options.shallowMessage ?? `fatal: reference repository '${hiddenMainRepoPath}' is shallow`);
           throw err;
         }
 
@@ -2258,7 +2290,7 @@ describe('shallow clone fallback', () => {
     return { cloneCalls };
   }
 
-  function setupAbortableShallowCloneMock(): { cloneCalls: string[][] } {
+  function setupAbortableShallowCloneMock(shallowMessage?: string): { cloneCalls: string[][] } {
     const cloneCalls: string[][] = [];
 
     mockSpawn.mockImplementation((_cmd, args) => {
@@ -2274,7 +2306,7 @@ describe('shallow clone fallback', () => {
       child.pid = 12345;
       child.kill = vi.fn();
 
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         cloneCalls.push([...argsArr]);
       }
 
@@ -2291,8 +2323,8 @@ describe('shallow clone fallback', () => {
           child.emit('close', 0);
           return;
         }
-        if (argsArr[0] === 'clone' && argsArr.includes('--reference')) {
-          child.stderr.emit('data', 'fatal: reference repository is shallow');
+        if (isCloneCommand(argsArr) && argsArr.includes('--reference')) {
+          child.stderr.emit('data', shallowMessage ?? `fatal: reference repository '${hiddenMainRepoPath}' is shallow`);
           child.emit('close', 1);
           return;
         }
@@ -2330,7 +2362,7 @@ describe('shallow clone fallback', () => {
       child.pid = 12345;
       child.kill = vi.fn();
 
-      if (argsArr[0] === 'clone') {
+      if (isCloneCommand(argsArr)) {
         cloneCalls.push([...argsArr]);
       }
 
@@ -2347,7 +2379,7 @@ describe('shallow clone fallback', () => {
           child.emit('close', 0);
           return;
         }
-        if (argsArr[0] === 'clone') {
+        if (isCloneCommand(argsArr)) {
           child.stderr.emit('data', stderr);
           child.emit('close', 1);
           return;
@@ -2380,6 +2412,8 @@ describe('shallow clone fallback', () => {
 
     // Two clone attempts: first with --reference, then without
     expect(cloneCalls).toHaveLength(2);
+    expect(cloneCalls[0]?.slice(0, 3)).toEqual(['-c', 'core.commitGraph=false', 'clone']);
+    expect(cloneCalls[1]?.[0]).toBe('clone');
 
     // First attempt includes --reference and --dissociate
     expect(cloneCalls[0]).toContain('--reference');
@@ -2392,8 +2426,8 @@ describe('shallow clone fallback', () => {
     expect(cloneCalls[1]).toContain('--no-local');
 
     // Both attempts target the same clone path
-    expect(cloneCalls[0][cloneCalls[0].length - 1]).toBe('/tmp/shallow-test');
-    expect(cloneCalls[1][cloneCalls[1].length - 1]).toBe('/tmp/shallow-test');
+    expect(cloneCalls[0]?.at(-1)).toBe('/tmp/shallow-test');
+    expect(cloneCalls[1]?.at(-1)).toBe('/tmp/shallow-test');
 
     expect(serializedCloneLogs()).not.toContain(hiddenMainRepoPath);
   });
@@ -2408,6 +2442,8 @@ describe('shallow clone fallback', () => {
     });
 
     expect(cloneCalls).toHaveLength(2);
+    expect(cloneCalls[0]?.slice(0, 3)).toEqual(['-c', 'core.commitGraph=false', 'clone']);
+    expect(cloneCalls[1]?.[0]).toBe('clone');
     expect(cloneCalls[0]).toContain('--reference');
     expect(cloneCalls[0]).toContain('--dissociate');
     expect(cloneCalls[0]).toContain('--no-local');
@@ -2415,6 +2451,85 @@ describe('shallow clone fallback', () => {
     expect(cloneCalls[1]).not.toContain('--dissociate');
     expect(cloneCalls[1]).toContain('--no-local');
     expect(serializedCloneLogs()).not.toContain(hiddenMainRepoPath);
+  });
+
+  const newlineReferenceError = "fatal: reference repository '/work/my\nproject' is shallow\n";
+
+  it('should fall back when the shallow reference path contains a newline', () => {
+    const { cloneCalls } = setupShallowCloneMock({ shallowError: true, shallowMessage: newlineReferenceError });
+
+    createSharedClone(linkedWorktreePath, { worktree: '/tmp/newline-reference', taskSlug: 'newline-reference' });
+
+    expect(cloneCalls).toHaveLength(2);
+    expect(cloneCalls[1]).not.toContain('--reference');
+  });
+
+  it('should fall back in the abortable clone when the shallow reference path contains a newline', async () => {
+    const { cloneCalls } = setupAbortableShallowCloneMock(newlineReferenceError);
+
+    await createSharedCloneAbortable(linkedWorktreePath, {
+      worktree: '/tmp/newline-reference-abortable',
+      taskSlug: 'newline-reference',
+      branch: 'feature/local-branch',
+    });
+
+    expect(cloneCalls).toHaveLength(2);
+    expect(cloneCalls[1]).not.toContain('--reference');
+  });
+
+  // A destination path may contain newlines, which can put a shallow-looking line in the middle of
+  // git's "destination path ... already exists" error. That error must neither retry nor delete.
+  const destinationExistsError = "fatal: destination path '/tmp/before\nfatal: reference repository 'p' is shallow\nafter' already exists and is not an empty directory.";
+
+  it('should not retry or delete an existing destination whose path mimics the shallow error', () => {
+    vi.mocked(fs.readdirSync).mockReturnValue(['existing'] as never);
+    const { cloneCalls } = setupShallowCloneMock({ shallowError: false, otherError: destinationExistsError });
+
+    expect(() => createSharedClone(hiddenMainRepoPath, {
+      worktree: '/tmp/existing-destination',
+      taskSlug: 'existing-destination',
+    })).toThrow('Git clone failed');
+
+    expect(cloneCalls).toHaveLength(1);
+    expect(fs.rmSync).not.toHaveBeenCalled();
+  });
+
+  it('should not retry or delete an existing destination in the abortable clone either', async () => {
+    vi.mocked(fs.readdirSync).mockReturnValue(['existing'] as never);
+    const { cloneCalls } = setupAbortableCloneFailureMock(destinationExistsError);
+
+    await expect(createSharedCloneAbortable(hiddenMainRepoPath, {
+      worktree: '/tmp/existing-destination-abortable',
+      taskSlug: 'existing-destination',
+    })).rejects.toThrow('Git clone failed');
+
+    expect(cloneCalls).toHaveLength(1);
+    expect(fs.rmSync).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an existing regular file (ENOTDIR)', 'ENOTDIR'],
+    ['an unreadable directory (EACCES)', 'EACCES'],
+  ])('should not retry or delete a destination that cannot be listed: %s', async (_label, code) => {
+    vi.mocked(fs.readdirSync).mockImplementation(() => {
+      throw Object.assign(new Error('cannot list'), { code });
+    });
+    const { cloneCalls } = setupShallowCloneMock({ shallowError: false, otherError: destinationExistsError });
+
+    expect(() => createSharedClone(hiddenMainRepoPath, {
+      worktree: '/tmp/existing-file-destination',
+      taskSlug: 'existing-file',
+    })).toThrow('Git clone failed');
+    expect(cloneCalls).toHaveLength(1);
+    expect(fs.rmSync).not.toHaveBeenCalled();
+
+    const abortable = setupAbortableCloneFailureMock(destinationExistsError);
+    await expect(createSharedCloneAbortable(hiddenMainRepoPath, {
+      worktree: '/tmp/existing-file-destination-abortable',
+      taskSlug: 'existing-file',
+    })).rejects.toThrow('Git clone failed');
+    expect(abortable.cloneCalls).toHaveLength(1);
+    expect(fs.rmSync).not.toHaveBeenCalled();
   });
 
   it('should sanitize non-shallow clone errors before throwing', () => {
@@ -2595,7 +2710,7 @@ describe('resolveCloneBaseDir parent-not-writable fallback', () => {
       const argsArr = args as string[];
       if (argsArr[0] === 'show-ref') throw new Error('not found');
       if (argsArr[0] === 'symbolic-ref') return Buffer.from('refs/remotes/origin/main\n');
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config' && argsArr[1] === '--local') throw new Error('not set');
       if (argsArr[0] === 'config') return Buffer.from('');
@@ -2624,7 +2739,7 @@ describe('resolveCloneBaseDir parent-not-writable fallback', () => {
       const argsArr = args as string[];
       if (argsArr[0] === 'show-ref') throw new Error('not found');
       if (argsArr[0] === 'symbolic-ref') return Buffer.from('refs/remotes/origin/main\n');
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config' && argsArr[1] === '--local') throw new Error('not set');
       if (argsArr[0] === 'config') return Buffer.from('');
@@ -2650,7 +2765,7 @@ describe('auto clone path allocation', () => {
       if (argsArr[0] === 'fetch') throw new Error('missing remote branch');
       if (argsArr[0] === 'show-ref') throw new Error('missing local branch');
       if (argsArr[0] === 'symbolic-ref') return Buffer.from('refs/remotes/origin/main\n');
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config' && argsArr[1] === '--local') throw new Error('not set');
       if (argsArr[0] === 'config') return Buffer.from('');
@@ -2704,7 +2819,7 @@ describe('auto clone path allocation', () => {
     mockExecFileSync.mockImplementation((_cmd, args) => {
       const argsArr = args as string[];
       if (argsArr[0] === 'symbolic-ref') return Buffer.from('refs/remotes/origin/main\n');
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config' && argsArr[1] === '--local') throw new Error('not set');
       if (argsArr[0] === 'config') return Buffer.from('');
@@ -2726,7 +2841,7 @@ describe('auto clone path allocation', () => {
     mockExecFileSync.mockImplementation((_cmd, args) => {
       const argsArr = args as string[];
       if (argsArr[0] === 'symbolic-ref') return Buffer.from('refs/remotes/origin/main\n');
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config' && argsArr[1] === '--local') throw new Error('not set');
       if (argsArr[0] === 'config') return Buffer.from('');
@@ -2755,7 +2870,7 @@ describe('auto clone path allocation', () => {
       const argsArr = args as string[];
       if (argsArr[0] === 'show-ref') throw new Error('not found');
       if (argsArr[0] === 'symbolic-ref') return Buffer.from('refs/remotes/origin/main\n');
-      if (argsArr[0] === 'clone') return Buffer.from('');
+      if (isCloneCommand(argsArr)) return Buffer.from('');
       if (argsArr[0] === 'remote') return Buffer.from('');
       if (argsArr[0] === 'config' && argsArr[1] === '--local') throw new Error('not set');
       if (argsArr[0] === 'config') return Buffer.from('');

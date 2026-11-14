@@ -11,6 +11,9 @@ export const parallelIntegrationTestGlobs = Object.freeze([
 // real child processes, or real Git boundaries.
 const legacyParallelIntegrationTestFiles = Object.freeze([
   'src/__tests__/it-daemon-process.test.ts',
+  'src/__tests__/daemon-storage.integration.test.ts',
+  'src/__tests__/daemon-watch-goals.integration.test.ts',
+  'src/__tests__/daemon-turn-process.integration.test.ts',
   'src/__tests__/it-daemon-conversations.test.ts',
   'src/__tests__/it-conversation-goal-registration.test.ts',
   'src/__tests__/projectLocalTaktSync.test.ts',
@@ -28,8 +31,11 @@ const legacyParallelIntegrationTestFiles = Object.freeze([
   'src/__tests__/merge-push.integration.test.ts',
   'src/__tests__/acp-entrypoint.test.ts',
   'src/__tests__/codex-spawn-guard.test.ts',
+  'src/__tests__/codex-mcp-list.test.ts',
   'src/__tests__/it-codex-mcp-isolation.test.ts',
   'src/__tests__/it-claude-terminal-startup-rejection.test.ts',
+  'src/__tests__/it-cursor-mcp-exclusions.test.ts',
+  'src/__tests__/it-opencode-header-env.test.ts',
   'src/__tests__/runtime-provider-companion.integration.test.ts',
   'src/__tests__/dependency-versions.test.ts',
   'src/__tests__/deepseek-harness-client.test.ts',
@@ -121,6 +127,7 @@ export const auditedIntegrationBoundaryTestFiles = Object.freeze([
   'src/__tests__/interactive-mode.test.ts',
   'src/__tests__/interactive.test.ts',
   'src/__tests__/it-central-task-process.test.ts',
+  'src/__tests__/it-daemon-slack-lifetime.test.ts',
   'src/__tests__/it-project-execution-lock.test.ts',
   'src/__tests__/it-report-inheritance-task-resume.test.ts',
   // Exercises task persistence through synchronous private-artifact subprocesses.
@@ -131,6 +138,7 @@ export const auditedIntegrationBoundaryTestFiles = Object.freeze([
   // Launches a real Chrome/Chromium child process for browser layout assertions.
   'src/__tests__/it-web-ui-retry-dom.test.ts',
   'src/__tests__/kiro-config.test.ts',
+  'src/__tests__/manager-slack-conversation.integration.test.ts',
   'src/__tests__/mcp-enqueue-draft-pr.integration.test.ts',
   'src/__tests__/mock-call-log.test.ts',
   'src/__tests__/opencode-client-cleanup.test.ts',
@@ -144,8 +152,8 @@ export const auditedIntegrationBoundaryTestFiles = Object.freeze([
   'src/__tests__/opencode-stream-handler.test.ts',
   'src/__tests__/otelFoundation.test.ts',
   'src/__tests__/parallel-runner-terminal-status.test.ts',
+  'src/__tests__/pending-inquiry-answers.test.ts',
   'src/__tests__/phase-runner-report-history.test.ts',
-  'src/__tests__/private-artifact-helper-error.test.ts',
   'src/__tests__/private-file-lock-acquisition.test.ts',
   'src/__tests__/private-file.test.ts',
   'src/__tests__/project-provider-profiles.test.ts',
@@ -230,10 +238,12 @@ export const fileSystemIntegrationTestFiles = Object.freeze([
   'src/__tests__/claude-headless-client.test.ts',
   'src/__tests__/claude-mcp-config.test.ts',
   'src/__tests__/claude-mcp-runtime.test.ts',
+  'src/__tests__/claude-read-deny-wiring.test.ts',
   'src/__tests__/cli-update-check.test.ts',
   'src/__tests__/clipboardImage.test.ts',
   'src/__tests__/clone-metadata-central.test.ts',
   'src/__tests__/codex-client-retry.test.ts',
+  'src/__tests__/codex-compaction.test.ts',
   'src/__tests__/codex-interactive-session-recovery.integration.test.ts',
   'src/__tests__/codex-skill-config.test.ts',
   'src/__tests__/config-path-collision.test.ts',
@@ -241,11 +251,13 @@ export const fileSystemIntegrationTestFiles = Object.freeze([
   'src/__tests__/conversationLoop-resume.test.ts',
   'src/__tests__/conversationSession.test.ts',
   'src/__tests__/copilot-client.test.ts',
+  'src/__tests__/cursor-mcp-settings.test.ts',
   'src/__tests__/deepseek-harness-credential-binding.test.ts',
   'src/__tests__/deepseek-harness-credential-patch.test.ts',
   'src/__tests__/deepseek-harness-credential-settings.test.ts',
   'src/__tests__/deploySkill.test.ts',
   'src/__tests__/deploySkillCodex.test.ts',
+  'src/__tests__/devin-client.test.ts',
   'src/__tests__/directRunFinder.test.ts',
   'src/__tests__/directRunResume.test.ts',
   'src/__tests__/entrypoint.test.ts',
@@ -279,8 +291,6 @@ export const fileSystemIntegrationTestFiles = Object.freeze([
   'src/__tests__/lstatIfExists.test.ts',
   'src/__tests__/managed-provider-retry-preflight.test.ts',
   'src/__tests__/managed-sdk-version-alignment.test.ts',
-  'src/__tests__/manager-read-scope.integration.test.ts',
-  'src/__tests__/manager-scoped-permission-storage.test.ts',
   'src/__tests__/mcp-entrypoint.test.ts',
   'src/__tests__/mock-scenario.test.ts',
   'src/__tests__/monitorJsonMetricExporter.test.ts',
@@ -289,6 +299,8 @@ export const fileSystemIntegrationTestFiles = Object.freeze([
   'src/__tests__/observability-compose.test.ts',
   'src/__tests__/opencode-coerce-tool-args.test.ts',
   'src/__tests__/opencode-list-tool-shim.test.ts',
+  'src/__tests__/opencode-types.test.ts',
+  'src/__tests__/opencode-v2-transport.test.ts',
   'src/__tests__/orderReader.test.ts',
   'src/__tests__/orderRevision.test.ts',
   'src/__tests__/pathBoundary.test.ts',
@@ -341,6 +353,7 @@ export const fileSystemIntegrationTestFiles = Object.freeze([
   'src/__tests__/sessionStore.test.ts',
   'src/__tests__/standalone-inquiries.integration.test.ts',
   'src/__tests__/statusLine.test.ts',
+  'src/__tests__/system-pr-status.test.ts',
   'src/__tests__/task-delete-task.test.ts',
   'src/__tests__/taskResultHandler.test.ts',
   'src/__tests__/taskSpecContext.test.ts',
@@ -348,6 +361,7 @@ export const fileSystemIntegrationTestFiles = Object.freeze([
   'src/__tests__/tmpdir.test.ts',
   'src/__tests__/traceReport.test.ts',
   'src/__tests__/tui-live-intervention-status.test.tsx',
+  'src/__tests__/tui-managed-provider.test.ts',
   'src/__tests__/tui-run.test.ts',
   'src/__tests__/usageEventLogger.test.ts',
   'src/__tests__/web-ui-directory-browser.test.ts',
@@ -372,6 +386,9 @@ export const publicContractIntegrationTestFiles = Object.freeze([
 export const lightContractIntegrationTestFiles = Object.freeze([
   'src/__tests__/analytics-workflowExecution.test.ts',
   'src/__tests__/cancellable-prompt-pipe.test.ts',
+  'src/__tests__/daemon-dispatcher.integration.test.ts',
+  'src/__tests__/daemon-manager-patrol.integration.test.ts',
+  'src/__tests__/daemon-reachability.integration.test.ts',
   'src/__tests__/sigint-interrupt.test.ts',
 ]);
 
@@ -380,13 +397,18 @@ export const lightContractIntegrationTestFiles = Object.freeze([
 // precedence over the broad filename globs so these stay in the normal light
 // IT gate instead of being promoted solely because of their names.
 export const lightNamedIntegrationTestFiles = Object.freeze([
-  'src/__tests__/conversation-store.integration.test.ts',
   'src/__tests__/daemon-conversation-events.integration.test.ts',
   'src/__tests__/daemon-conversation-ipc.integration.test.ts',
+  'src/__tests__/daemon-retired-watch-events.integration.test.ts',
+  'src/__tests__/daemon-startup.integration.test.ts',
   'src/__tests__/deepseek-runtime-mode-input.integration.test.ts',
+  'src/__tests__/director-foundation.integration.test.ts',
+  'src/__tests__/epic-storage.integration.test.ts',
   'src/__tests__/exec-workflowRunner.integration.test.ts',
   'src/__tests__/facet-includes-integration.test.ts',
+  'src/__tests__/interactive-resume-records.integration.test.ts',
   'src/__tests__/it-acp-workflow-bridge.test.ts',
+  'src/__tests__/it-assistant-mcp-cli-args.test.ts',
   'src/__tests__/it-cli-dynamic-import-error.test.ts',
   'src/__tests__/it-cli-entrypoint-lazy-loading.test.ts',
   'src/__tests__/it-cli-entrypoint-required-option-errors.test.ts',
@@ -401,9 +423,11 @@ export const lightNamedIntegrationTestFiles = Object.freeze([
   'src/__tests__/it-live-intervention-task-spec.test.ts',
   'src/__tests__/it-manager-compact-display.test.ts',
   'src/__tests__/it-manager-conversation-plan.test.ts',
-  'src/__tests__/it-manager-patrol.test.ts',
+  'src/__tests__/it-manager-goal-specifications.test.ts',
+  'src/__tests__/it-manager-verification-interruption.test.ts',
   'src/__tests__/it-mcp-task-cleanup.test.ts',
   'src/__tests__/it-opencode-task-state-mcp.test.ts',
+  'src/__tests__/it-opencode-v2-assistant-mcp.test.ts',
   'src/__tests__/it-phase3-persona-prompts.test.ts',
   'src/__tests__/it-pipe-reader.test.ts',
   'src/__tests__/it-project-execution-entrypoints.test.ts',
@@ -411,6 +435,7 @@ export const lightNamedIntegrationTestFiles = Object.freeze([
   'src/__tests__/it-report-input-contracts.test.ts',
   'src/__tests__/it-resume-declared-report-reference-snapshot.test.ts',
   'src/__tests__/it-run-session-instruct.test.ts',
+  'src/__tests__/it-system-command-input-config.test.ts',
   'src/__tests__/it-system-enqueue-effect-duplicate.test.ts',
   'src/__tests__/it-tui-esc-menu-routes.test.ts',
   'src/__tests__/it-web-ui-chat-tell.test.ts',
@@ -421,11 +446,12 @@ export const lightNamedIntegrationTestFiles = Object.freeze([
   'src/__tests__/manager-conversation-client.integration.test.ts',
   'src/__tests__/manager-conversation-sequential-reads.integration.test.ts',
   'src/__tests__/manager-conversation-service.integration.test.ts',
-  'src/__tests__/manager-tool-permission-inquiries.integration.test.ts',
+  'src/__tests__/manager-turn-failure-webhook.integration.test.ts',
   'src/__tests__/merge-caccia.test.ts',
   'src/__tests__/merge-pagination.integration.test.ts',
   'src/__tests__/merge-settings.integration.test.ts',
   'src/__tests__/opencode-managed-sdk-state.integration.test.ts',
+  'src/__tests__/opencode-mcp-pool-identity.test.ts',
   'src/__tests__/pi-builtin-override.integration.test.ts',
   'src/__tests__/pi-sdk-compat.integration.test.ts',
   'src/__tests__/repertoire/add-integration.test.ts',
@@ -435,6 +461,7 @@ export const lightNamedIntegrationTestFiles = Object.freeze([
   'src/__tests__/runtime-provider-internal-agents.integration.test.ts',
   'src/__tests__/runtime-provider-nonworkflow-seam.integration.test.ts',
   'src/__tests__/taskInstructionActions.test.ts',
+  'src/__tests__/tool-activity-terminal.integration.test.ts',
   'src/__tests__/verify-across-providers.integration.test.ts',
 ]);
 
@@ -446,7 +473,13 @@ export const lightIntegrationTestFiles = Object.freeze([
 ]);
 
 export const heavyParallelIntegrationTestFiles = Object.freeze([
-  'src/__tests__/caccia-published-pr.integration.test.ts',
+  'src/__tests__/tool-activity-runner-exit.integration.test.ts',
+  'src/__tests__/tool-activity-workflow.integration.test.ts',
+  'src/__tests__/daemon-wait-command.integration.test.ts',
+  'src/__tests__/workflow-resume-results.integration.test.ts',
+  'src/__tests__/it-cli-react-production.test.ts',
+  'src/__tests__/it-goal-task-pause-retry.test.ts',
+  'src/__tests__/it-daemon-worktree-run-log.test.ts',
   ...legacyParallelIntegrationTestFiles,
   ...auditedIntegrationBoundaryTestFiles,
   // Measured slow suites dominate the serial light gate; CI shards this gate.
@@ -466,12 +499,16 @@ export const parallelIntegrationTestFiles = Object.freeze([
 // Escape hatch for tests that must not run concurrently with the rest of the
 // IT slice. A 2026-08 audit found zero files with shared mutable state (all
 // use mkdtemp isolation under pool:'forks'), so membership is not about
-// correctness. The files below are fsync/spawnSync storms: their IO
-// serializes at the device level, so running them in the parallel pool only
-// adds contention and can block a worker synchronously past the 60s vitest
-// RPC timeout (spurious "Timeout calling onTaskUpdate" unhandled errors).
+// correctness. Their fsync/spawnSync-heavy workloads compete for CPU and IO
+// in the parallel pool, which can exceed hook deadlines or block a worker
+// synchronously past the 60s vitest RPC timeout (spurious "Timeout calling
+// onTaskUpdate" unhandled errors).
 // Add a file here only with a measured interference reason.
 export const serialGitTestFiles = Object.freeze([
+  // 2026-11: On a loaded 10-CPU machine, the 4-worker heavy run exceeded
+  // the 10s beforeEach limit in synchronous Git fixture setup; the same suite
+  // passed alone with 1 worker. Isolate its init/commit/push/clone workload.
+  'src/__tests__/caccia-published-pr.integration.test.ts',
   'src/__tests__/companion-diff-runtime.integration.test.ts',
   'src/__tests__/it-list-filtered-delete.test.ts',
   // 2026-08-09: ラウンド9で遷移表→実 WorkflowEngine シナリオへ置換した結果、Git fixture+filesystem I/O の重量級になった(#1264 shard 飽和の主因)。

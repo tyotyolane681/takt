@@ -2,26 +2,129 @@ import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { ConversationTransferReceiver, type ConversationReadMetadata } from '../features/manager/conversationTransferReceiver.js';
 import { ConversationFrameDecoder, conversationTransferFrames, encodeConversationFrame, MAX_CONVERSATION_FRAME_BYTES } from '../features/daemon/conversationFrames.js';
-import type { ConversationState } from '../features/manager/conversationPort.js';
+import { SnapshotChanges, snapshotItemKey, orderSnapshotItems } from '../features/manager/snapshotChanges.js';
+import type { SnapshotValue, ConversationState } from '../features/manager/conversationPort.js';
 import { conversationRecord } from './helpers/conversation-fixtures.js';
+import { MAX_CONVERSATION_TEXT_BYTES } from '../shared/types/conversation-activity.js';
+import { ToolActivityHistory } from '../shared/tool-activity/history.js';
 
 function fixture() {
   const record = conversationRecord('/repository');
   const state: ConversationState = { conversationId: record.id, assignment: record.assignment, revision: 4,
     pending: record.pending, approval: null, running: null, interrupted: false };
-  const observer = { state: vi.fn(), item: vi.fn(), output: vi.fn(), read: vi.fn() };
+  const observer = { state: vi.fn(), item: vi.fn(), output: vi.fn(), read: vi.fn(), remove: vi.fn() };
   const receiver = new ConversationTransferReceiver(record.id, observer);
   const metadata = (revision: number, stateSequence: number, operationId: string | null = null): ConversationReadMetadata => ({
-    conversationId: record.id, transferId: randomUUID(), revision, stateSequence, operationId,
+    conversationId: record.id, transferId: randomUUID(), revision, stateSequence, operationId, mode: 'initial',
   });
   const event = (output: unknown) => ({ protocolVersion: 1, type: 'event', conversationId: record.id, output });
   const frames = async (read: ConversationReadMetadata, items: unknown[], purpose: 'snapshot' | 'output' = 'snapshot') => {
     const values: unknown[] = [];
-    for await (const { frame } of conversationTransferFrames(record.id, read, purpose, (async function* () { yield* items; })())) values.push(frame);
+    for await (const { frame } of conversationTransferFrames(record.id, purpose === 'snapshot' ? read : { ...read, mode: undefined }, purpose, (async function* () { yield* items; })())) values.push(frame);
     return values;
   };
   return { receiver, observer, state, metadata, event, frames };
 }
+
+it('transfers saved tool history and rejects mismatched operation, duplicate keys and completed running entries', async () => {
+  const operationId = randomUUID();
+  const source = new ToolActivityHistory(() => 1000);
+  source.apply({ type: 'tool_use', data: { id: 'tool', tool: 'Read', input: {} },
+    toolActivity: { callId: 'call', operationId, generation: 1 } });
+  const history = { operationId, generation: 1, finished: false, eventIds: ['event'], history: source.snapshot() };
+  const f = fixture();
+  for (const frame of await f.frames(f.metadata(4, 1, operationId), [{ kind: 'tool_history', history }], 'output')) f.receiver.receive(frame);
+  expect(f.observer.output).toHaveBeenCalledExactlyOnceWith({ kind: 'tool_history', history }, expect.anything());
+  for (const invalid of [
+    { ...history, operationId: randomUUID() },
+    { ...history, finished: true },
+    { ...history, generation: 2 },
+    { ...history, history: { ...history.history, entries: [...history.history.entries, ...history.history.entries] } },
+    { ...history, eventIds: ['event', 'event'] },
+  ]) {
+    const f = fixture();
+    const frames = await f.frames(f.metadata(4, 1, operationId), [{ kind: 'tool_history', history: invalid }], 'output');
+    expect(() => { for (const frame of frames) f.receiver.receive(frame); }).toThrow();
+    expect(f.observer.output).not.toHaveBeenCalled();
+  }
+});
+
+it.each(['コードを読む', 'あ'.repeat(256)])('receives bounded Bash descriptions through output transfers: %s', async (description) => {
+  const { receiver, observer, metadata, frames } = fixture();
+  const operationId = randomUUID();
+  const output = { kind: 'activity', operationId, generation: 1, activity: { kind: 'tool', tool: 'Bash', description } };
+  for (const frame of await frames(metadata(5, 2, operationId), [output], 'output')) receiver.receive(frame);
+  expect(observer.output).toHaveBeenCalledExactlyOnceWith(output, expect.objectContaining({ operationId }));
+});
+
+it('receives bounded intermediate text and rejects overflow and extra fields', async () => {
+  const operationId = randomUUID();
+  const output = { kind: 'turn_text', operationId, generation: 1, message: 'a'.repeat(MAX_CONVERSATION_TEXT_BYTES) };
+  const f = fixture();
+  for (const frame of await f.frames(f.metadata(5, 2, operationId), [output], 'output')) f.receiver.receive(frame);
+  expect(f.observer.output).toHaveBeenCalledExactlyOnceWith(output, expect.objectContaining({ operationId }));
+  for (const invalid of [
+    { ...output, message: 'あ'.repeat(Math.ceil(MAX_CONVERSATION_TEXT_BYTES / 3)) },
+    { ...output, command: 'private command' },
+  ]) {
+    const f = fixture();
+    const values = await f.frames(f.metadata(5, 2, operationId), [invalid], 'output');
+    expect(() => { for (const frame of values) f.receiver.receive(frame); }).toThrow();
+    expect(f.observer.output).not.toHaveBeenCalled();
+  }
+});
+
+it('preserves a known turn start time through a running snapshot', async () => {
+  const f = fixture();
+  const state = { ...f.state, running: { operationId: randomUUID(), kind: 'turn', generation: 1, startedAt: Date.now() - 65000 } };
+  const read = f.metadata(state.revision, 2, state.running.operationId);
+  for (const frame of await f.frames(read, [{ kind: 'state', state }])) f.receiver.receive(frame);
+  expect(f.observer.state).toHaveBeenCalledExactlyOnceWith(state, read);
+});
+
+it.each([
+  { kind: 'tool', tool: 'Bash', description: 'あ'.repeat(257) },
+  { kind: 'tool', tool: 'Bash', description: 'line\nline' },
+  { kind: 'tool', tool: 'Bash', description: '\u001b[31mred' },
+  { kind: 'tool', tool: 'Bash', description: 'line\u2028line' },
+  { kind: 'tool', tool: 'Bash', description: 42 },
+  { kind: 'tool', tool: 'Bash', description: 'safe', input: { command: 'private' } },
+  { kind: 'tool', tool: 'Read', description: 'private input' },
+])('rejects invalid descriptions and tool inputs at the TUI receiver: %#', async (activity) => {
+  const { receiver, observer, metadata, frames } = fixture();
+  const operationId = randomUUID();
+  const output = { kind: 'activity', operationId, generation: 1, activity };
+  const values = await frames(metadata(5, 2, operationId), [output], 'output');
+  expect(() => { for (const frame of values) receiver.receive(frame); }).toThrow();
+  expect(observer.output).not.toHaveBeenCalled();
+});
+
+it('validates and delivers a user message with the matching operation identity', async () => {
+  const { receiver, observer, metadata, frames } = fixture();
+  const operationId = randomUUID();
+  const message = { kind: 'user_message', operationId, message: 'Shared input' };
+  const read = metadata(5, 2, operationId);
+  for (const frame of await frames(read, [message], 'output')) receiver.receive(frame);
+  expect(observer.output).toHaveBeenCalledExactlyOnceWith(message, expect.objectContaining({ operationId }));
+});
+
+it.each(['reply', 'notice'] as const)('preserves the %s result kind when receiving daemon output', async (kind) => {
+  const { receiver, observer, metadata, frames } = fixture();
+  const operationId = randomUUID();
+  const output = { kind: 'result', operationId, result: { kind, message: 'Same text' } };
+  const read = metadata(5, 2, operationId);
+  for (const frame of await frames(read, [output], 'output')) receiver.receive(frame);
+  expect(observer.output).toHaveBeenCalledExactlyOnceWith(output, expect.objectContaining({ operationId }));
+});
+
+it('rejects a user message belonging to a different operation', async () => {
+  const { receiver, observer, metadata, frames } = fixture();
+  const read = metadata(5, 2, randomUUID());
+  const message = { kind: 'user_message', operationId: randomUUID(), message: 'Wrong operation' };
+  const values = await frames(read, [message], 'output');
+  expect(() => { for (const frame of values) receiver.receive(frame); }).toThrow();
+  expect(observer.output).not.toHaveBeenCalled();
+});
 
 it.each([
   { responseAfter: 'start', frameCount: 1 },
@@ -37,9 +140,9 @@ it.each([
   receiver.expectRead(read);
   values.slice(frameCount).forEach((frame) => receiver.receive(frame));
 
-  expect(observer.read.mock.calls).toEqual([['reading', read.transferId], ['complete', read.transferId]]);
+  expect(observer.read.mock.calls).toEqual([['reading', read.transferId, 'initial', read], ['complete', read.transferId, 'initial', read]]);
   expect(observer.state).toHaveBeenCalledExactlyOnceWith(state, read);
-  expect(observer.item).toHaveBeenCalledExactlyOnceWith(item, read.transferId);
+  expect(observer.item).toHaveBeenCalledExactlyOnceWith(item, read.transferId, read);
 });
 
 it.each([
@@ -66,13 +169,13 @@ it('keeps an early failed read incomplete after its response and completes a rep
 
   receiver.expectRead(read);
   values.slice(1).forEach((frame) => receiver.receive(frame));
-  expect(observer.read.mock.calls).toEqual([['reading', read.transferId], ['incomplete', read.transferId]]);
+  expect(observer.read.mock.calls).toEqual([['reading', read.transferId, 'initial', read], ['incomplete', read.transferId, 'initial', read]]);
   expect(observer.state).not.toHaveBeenCalled();
 
   const replacement = metadata(4, 2);
   receiver.expectRead(replacement);
   for (const frame of await frames(replacement, [{ kind: 'state', state }])) receiver.receive(frame);
-  expect(observer.read).toHaveBeenLastCalledWith('complete', replacement.transferId);
+  expect(observer.read).toHaveBeenLastCalledWith('complete', replacement.transferId, 'initial', replacement);
   expect(observer.state).toHaveBeenCalledExactlyOnceWith(state, replacement);
 });
 
@@ -90,7 +193,7 @@ it('accepts an early snapshot with a restarted sequence after reauthentication o
   receiver.expectRead(read);
   values.slice(1).forEach((frame) => receiver.receive(frame));
 
-  expect(observer.read).toHaveBeenLastCalledWith('complete', read.transferId);
+  expect(observer.read).toHaveBeenLastCalledWith('complete', read.transferId, 'initial', read);
   expect(observer.state).toHaveBeenLastCalledWith(state, read);
   expect(observer.state).toHaveBeenCalledTimes(2);
 });
@@ -111,7 +214,7 @@ it.each([7, 9])('reassembles a pending proposal with %s large constraints across
     for (const frame of decoder.decode(wire.subarray(offset, offset + 73_777))) receiver.receive(frame);
   }
   expect(observer.state).toHaveBeenCalledExactlyOnceWith(state, read);
-  expect(observer.read).toHaveBeenLastCalledWith('complete', read.transferId);
+  expect(observer.read).toHaveBeenLastCalledWith('complete', read.transferId, 'initial', read);
 });
 
 it('keeps revision five when an old read ends and when late revision four output arrives', async () => {
@@ -146,7 +249,7 @@ it('discards partial bytes on disconnect and accepts a new authenticated read wi
   receiver.receive(event({ kind: 'transfer_data', transferId: read.transferId, itemIndex: 0, fragmentIndex: 0, finalFragment: false, data: 'ew==' }));
   receiver.disconnect();
   expect(observer.state).not.toHaveBeenCalled();
-  expect(observer.read).toHaveBeenLastCalledWith('incomplete', read.transferId);
+  expect(observer.read).toHaveBeenLastCalledWith('incomplete', read.transferId, 'initial', read);
   receiver.authenticated();
   const next = metadata(4, 0); receiver.expectRead(next);
   for (const frame of await frames(next, [{ kind: 'state', state }])) receiver.receive(frame);
@@ -174,7 +277,7 @@ it.each(['index', 'fragment', 'base64', 'utf8', 'json', 'schema', 'identity', 'c
   }
   expect(observer.state).not.toHaveBeenCalled();
   receiver.disconnect();
-  expect(observer.read).toHaveBeenLastCalledWith('incomplete', read.transferId);
+  expect(observer.read).toHaveBeenLastCalledWith('incomplete', read.transferId, 'initial', read);
 });
 
 it('matches snapshot response metadata and discards cancelled transfer data', async () => {
@@ -188,7 +291,7 @@ it('matches snapshot response metadata and discards cancelled transfer data', as
   expect(observer.state).not.toHaveBeenCalled();
   for (const frame of await frames(replacement, [{ kind: 'state', state }])) receiver.receive(frame);
   expect(observer.state).toHaveBeenCalledOnce();
-  expect(observer.read).toHaveBeenLastCalledWith('complete', replacement.transferId);
+  expect(observer.read).toHaveBeenLastCalledWith('complete', replacement.transferId, 'initial', replacement);
 });
 
 it('requires a goal objective in a snapshot inquiry before publishing it to the view', async () => {
@@ -200,5 +303,133 @@ it('requires a goal objective in a snapshot inquiry before publishing it to the 
       question: { id: randomUUID(), recipient: 'human', status: 'pending', body: 'Choose a format' } } }]);
   expect(() => values.forEach((value) => receiver.receive(value))).toThrow();
   expect(observer.item.mock.calls.some(([item]) => item.kind === 'inquiry')).toBe(false);
-  expect(observer.read).toHaveBeenLastCalledWith('incomplete', read.transferId);
+  expect(observer.read).toHaveBeenLastCalledWith('incomplete', read.transferId, 'initial', read);
+});
+
+function changeRead(changes: SnapshotChanges, values: SnapshotValue[]) {
+  return changes.read({ transferId: randomUUID(), conversationId: 'conversation', revision: 0, stateSequence: 0, operationId: null },
+    (async function* () { yield* values; })());
+}
+async function consumeChanges(read: ReturnType<typeof changeRead>) {
+  const values = [];
+  for await (const value of read.items) values.push(value);
+  return values;
+}
+it('sends only changed values and removed keys after explicit completion and permits an empty delta', async () => {
+  const changes = new SnapshotChanges();
+  const first: SnapshotValue = { kind: 'display_event', event: { id: 'first', message: 'Original' } };
+  const second: SnapshotValue = { kind: 'display_event', event: { id: 'second', message: 'Retained' } };
+  const initial = changeRead(changes, [first, second]);
+  expect(initial.mode).toBe('initial');
+  expect(await consumeChanges(initial)).toEqual([first, second]);
+  initial.complete();
+  const unchanged = changeRead(changes, [first, second]);
+  expect(unchanged.mode).toBe('delta');
+  expect(await consumeChanges(unchanged)).toEqual([]);
+  unchanged.complete();
+  const changed = { ...first, event: { ...first.event, message: 'Updated' } };
+  const delta = changeRead(changes, [changed]);
+  expect(await consumeChanges(delta)).toEqual([changed, { kind: 'remove', key: snapshotItemKey(second) }]);
+  delta.complete();
+  expect(await consumeChanges(changeRead(changes, [changed]))).toEqual([]);
+});
+it.each(['unconsumed', 'cancelled', 'replaced'] as const)('does not commit an %s read or a late completion', async (failure) => {
+  const changes = new SnapshotChanges();
+  const event: SnapshotValue = { kind: 'display_event', event: { id: 'change', message: 'Visible' } };
+  const read = changeRead(changes, [event]);
+  if (failure !== 'unconsumed') await consumeChanges(read);
+  if (failure === 'cancelled') read.cancel();
+  if (failure === 'replaced') changeRead(changes, []);
+  read.complete();
+  const retry = changeRead(changes, [event]);
+  expect(retry.mode).toBe('initial');
+  expect(await consumeChanges(retry)).toEqual([event]);
+});
+it('rejects duplicate source keys instead of committing an ambiguous snapshot', async () => {
+  const changes = new SnapshotChanges();
+  const event: SnapshotValue = { kind: 'display_event', event: { id: 'same', message: 'Visible' } };
+  const read = changeRead(changes, [event, event]);
+  await expect(consumeChanges(read)).rejects.toThrow('Repeated snapshot item');
+  read.complete();
+  expect(changeRead(changes, []).mode).toBe('initial');
+});
+it('uses canonical inquiry identity and preserves assignment repository order and inquiry creation order', () => {
+  const question = { id: randomUUID(), body: 'Choose', recipient: 'human' as const, status: 'pending' as const };
+  const inquiry: SnapshotValue = { kind: 'inquiry', inquiry: { target: { goalId: 'goal', repositoryDirectory: '/second' }, question, objective: 'Goal' } };
+  expect(snapshotItemKey(inquiry)).toBe(snapshotItemKey({ kind: 'inquiry', inquiry: { ...inquiry.inquiry,
+    target: { repositoryDirectory: '/second', goalId: 'goal' } } }));
+  const values: Exclude<SnapshotValue, { kind: 'state' }>[] = [
+    { kind: 'goal', goal: { awaitingHumanMerge: false, id: 'a', objective: 'Second', repositoryDirectory: '/second', status: 'created', executionStatus: 'active' } },
+    inquiry,
+    { kind: 'assignment', assignment: { kind: 'repository', repositoryDirectory: '/first', repositoryDirectories: ['/first', '/second'] } },
+    { kind: 'goal', goal: { awaitingHumanMerge: false, id: 'z', objective: 'First', repositoryDirectory: '/first', status: 'created', executionStatus: 'active' } },
+    { kind: 'inquiry', inquiry: { ...inquiry.inquiry, question: { ...question, id: randomUUID(), createdAt: '2026-01-01T00:00:00Z' } } },
+  ];
+  expect(orderSnapshotItems(new Map(values.map((value) => [snapshotItemKey(value), value])))).toEqual([
+    values[2], values[3], values[0], values[4], values[1],
+  ]);
+});
+it('accepts empty deltas and validates changed repositories against the completed assignment', async () => {
+  const { receiver, observer, metadata, state, frames } = fixture();
+  const initial = metadata(4, 1);
+  for (const frame of await frames(initial, [{ kind: 'state', state },
+    { kind: 'assignment', assignment: { ...state.assignment, repositoryDirectories: ['/repository'] } }])) receiver.receive(frame);
+  const delta = { ...metadata(4, 1), mode: 'delta' as const };
+  receiver.expectRead(delta);
+  for (const frame of await frames(delta, [])) receiver.receive(frame);
+  expect(observer.read).toHaveBeenLastCalledWith('complete', delta.transferId, 'delta', delta);
+  const invalid = { ...metadata(4, 1), mode: 'delta' as const };
+  receiver.expectRead(invalid);
+  const goal = { kind: 'goal', goal: { awaitingHumanMerge: false, id: randomUUID(), objective: 'Outside', repositoryDirectory: '/other', status: 'created', executionStatus: 'active' } };
+  const values = await frames(invalid, [goal]);
+  expect(() => values.forEach((frame) => receiver.receive(frame))).toThrow('Display repository outside assignment');
+});
+it('requires a completed initial read before delta and rejects a mode mismatch', async () => {
+  const { receiver, metadata, state, frames } = fixture();
+  const delta = { ...metadata(4, 1), mode: 'delta' as const };
+  expect(() => receiver.expectRead(delta)).not.toThrow();
+  const values = await frames(delta, []);
+  expect(() => receiver.receive(values[0])).toThrow('Delta before initial snapshot');
+  const initial = metadata(4, 1); receiver.expectRead(initial);
+  const initialFrames = await frames(initial, [{ kind: 'state', state }]);
+  receiver.receive(initialFrames[0]);
+  expect(() => receiver.expectRead({ ...initial, mode: 'delta' })).toThrow('Read metadata mismatch');
+});
+
+it('accepts a repeated deletion on a later delta so a retried read remains idempotent', async () => {
+  const { receiver, observer, metadata, state, frames } = fixture();
+  const event = { kind: 'display_event', event: { id: 'removed', message: 'Visible' } } as const;
+  for (const frame of await frames(metadata(4, 1), [{ kind: 'state', state }, event])) receiver.receive(frame);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const delta = { ...metadata(4, 1), mode: 'delta' as const };
+    receiver.expectRead(delta);
+    for (const frame of await frames(delta, [{ kind: 'remove', key: snapshotItemKey(event) }])) receiver.receive(frame);
+    expect(observer.read).toHaveBeenLastCalledWith('complete', delta.transferId, 'delta', delta);
+  }
+  expect(observer.remove.mock.calls.map(([key]) => key)).toEqual([snapshotItemKey(event), snapshotItemKey(event)]);
+});
+
+it.each(['value', 'remove'] as const)('rejects a duplicate delta key from a second %s before publishing it', async (duplicate) => {
+  const { receiver, observer, metadata, state, frames } = fixture();
+  for (const frame of await frames(metadata(4, 1), [{ kind: 'state', state }])) receiver.receive(frame);
+  const delta = { ...metadata(4, 1), mode: 'delta' as const };
+  const event = { kind: 'display_event', event: { id: 'same', message: 'Visible' } } as const;
+  const repeated = duplicate === 'value' ? event : { kind: 'remove', key: snapshotItemKey(event) };
+  receiver.expectRead(delta);
+  const values = await frames(delta, [event, repeated]);
+
+  expect(() => values.forEach((frame) => receiver.receive(frame))).toThrow();
+  expect(observer.item).toHaveBeenCalledExactlyOnceWith(event, delta.transferId, delta);
+  expect(observer.remove).not.toHaveBeenCalled();
+  expect(observer.read).toHaveBeenLastCalledWith('incomplete', delta.transferId, 'delta', delta);
+});
+
+it.each(['message', 'task_completed', 'watch_observation', 'turn'])('preserves active %s turn generation through a snapshot for interruption', async (kind) => {
+  const { receiver, observer, state, metadata, frames } = fixture();
+  const operationId = randomUUID();
+  const read = metadata(4, 2, operationId);
+  const running = { ...state, running: { kind, operationId, generation: 9 } };
+  receiver.expectRead(read);
+  for (const frame of await frames(read, [{ kind: 'state', state: running }])) receiver.receive(frame);
+  expect(observer.state).toHaveBeenCalledExactlyOnceWith(running, read);
 });

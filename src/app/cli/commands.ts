@@ -61,14 +61,23 @@ program
   .command('daemon')
   .description('Run the manager daemon (started automatically by takt manager; use takt daemon stop to stop it)')
   .action(async () => {
-    const { runDaemon } = await import('../../features/daemon/runDaemon.js');
-    await runDaemon();
+    const { runDaemonForeground } = await import('../../features/daemon/lifecycle.js');
+    await runDaemonForeground();
   })
   .command('stop')
   .description('Stop the manager daemon')
   .action(async () => {
     const { stopDaemon } = await import('../../features/daemon/lifecycle.js');
     await stopDaemon();
+  });
+
+program
+  .command('director')
+  .description('Open the experimental director conversation TUI')
+  .action(async () => {
+    const { getCliExecutionContext } = await import('./initialization.js');
+    const { runDirector } = await import('../../features/director/runDirector.js');
+    await runDirector({ cwd: getCliExecutionContext().cwd, agentOverrides: resolveAgentOverrides(program) });
   });
 
 program
@@ -275,7 +284,7 @@ program
         workflow: opts.workflow, includeDraft: opts.includeDraft, includeForks: opts.includeForks,
         ...(Object.keys(where).length === 0 ? {} : { where }),
       });
-      info(`Processed: ${result.processedCount}, merged: ${result.mergedCount}`);
+      info(`Processed: ${result.processedCount}, merged: ${result.mergedCount}, prepared: ${result.preparedCount}`);
       process.exitCode = result.exitCode;
     } catch (error) {
       logError(sanitizeTerminalText(getErrorMessage(error)));

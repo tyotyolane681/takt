@@ -22,8 +22,8 @@ function createFixture() {
   };
 }
 
-const SDK_VERSION = '0.2.1-alpha.2';
-const CORDIS_VERSION = '4.0.5-alpha.1';
+const SDK_VERSION = '0.2.1-rc.5';
+const CORDIS_VERSION = '4.0.5';
 const STALE_VERSION = '0.0.0-stale';
 const sdkDependencies = {
   '@deepseek-ai/cordis': CORDIS_VERSION,
@@ -36,7 +36,7 @@ const sdkDependencies = {
   '@deepseek-ai/dsh-subagent': SDK_VERSION,
 };
 
-/** Build a consistent pinned SDK graph with independent root/managed lock entries for stale-version tests. */
+/** Build a consistent managed SDK graph with a DeepSeek-free root manifest and lock. */
 function createDeepSeekFixture(): {
   root: Parameters<typeof verifyDeepSeekManagedLock>[0];
   rootLock: Parameters<typeof verifyDeepSeekManagedLock>[1];
@@ -44,47 +44,61 @@ function createDeepSeekFixture(): {
   lock: Parameters<typeof verifyDeepSeekManagedLock>[3];
   constants: string;
 } {
-  const rootLockPackages = Object.fromEntries(Object.entries(sdkDependencies).map(([name, version]) => [
-    `node_modules/${name}`,
-    { version },
-  ]));
   const managedDependencies = {
     ...sdkDependencies,
+    '@deepseek-ai/cordis-plugin-group': '1.0.5',
+    '@deepseek-ai/dsh-sandbox': SDK_VERSION,
     '@deepseek-ai/libreoffice-kit': '0.1.5',
   };
   const managedLockPackages = Object.fromEntries(Object.entries(managedDependencies).map(([name, version]) => [
     `node_modules/${name}`,
     { version },
   ]));
+  managedLockPackages['node_modules/@deepseek-ai/cordis-plugin-loader'] = { version: '1.0.6' };
 
   return {
     root: {
       dependencies: {},
       bundleDependencies: [],
-      devDependencies: { ...sdkDependencies },
-      files: ['managed/deepseek-harness/'],
+      devDependencies: {},
+      files: ['managed/*/package.json', 'managed/*/package-lock.json'],
     },
     rootLock: {
       packages: {
-        '': { devDependencies: { ...sdkDependencies } },
-        ...rootLockPackages,
+        '': { dependencies: {}, devDependencies: {} },
       },
     },
     managed: {
       dependencies: managedDependencies,
-      overrides: { fflate: '0.8.3' },
+      overrides: { fflate: '0.8.3', '@earendil-works/pi-ai': '1.5.0' },
     },
     lock: {
       packages: {
         '': { dependencies: { ...managedDependencies } },
         ...managedLockPackages,
         'node_modules/fflate': { version: '0.8.3' },
+        'node_modules/@earendil-works/pi-ai': { version: '1.5.0' },
         'node_modules/@deepseek-ai/dsh-sdk-client': {
           version: SDK_VERSION,
           peerDependencies: {
-            '@deepseek-ai/cordis': '~4.0.5-alpha.1',
+            '@deepseek-ai/cordis': '~4.0.5',
             '@deepseek-ai/dsh-llm': SDK_VERSION,
             '@deepseek-ai/dsh-sdk-protocol': SDK_VERSION,
+            '@deepseek-ai/dsh-session': SDK_VERSION,
+          },
+        },
+        'node_modules/@deepseek-ai/cordis-plugin-group': {
+          version: '1.0.5',
+          peerDependencies: {
+            '@deepseek-ai/cordis': '~4.0.5',
+            '@deepseek-ai/cordis-plugin-loader': '~1.0.6',
+          },
+        },
+        'node_modules/@deepseek-ai/dsh-sandbox': {
+          version: SDK_VERSION,
+          peerDependencies: {
+            '@deepseek-ai/cordis': '~4.0.5',
+            '@deepseek-ai/dsh-llm': SDK_VERSION,
             '@deepseek-ai/dsh-session': SDK_VERSION,
           },
         },
@@ -161,11 +175,11 @@ describe('managed DeepSeek npm dependency graph', () => {
         fixture.managed,
         fixture.lock,
         fixture.constants,
-      )).toThrow('without production DeepSeek dependencies');
+      )).toThrow('without root DeepSeek dependencies');
     },
   );
 
-  it('accepts unrelated optional dependencies while keeping DeepSeek development-only', () => {
+  it('accepts unrelated optional dependencies while keeping DeepSeek managed-only', () => {
     const fixture = createDeepSeekFixture();
     fixture.root.optionalDependencies = { fflate: '0.8.3' };
 
@@ -178,14 +192,157 @@ describe('managed DeepSeek npm dependency graph', () => {
     )).not.toThrow();
   });
 
+  it('rejects a Cordis pin other than 4.0.5 in the managed SDK graph', () => {
+    const fixture = createDeepSeekFixture();
+    const staleVersion = '4.0.5-alpha.1';
+    fixture.managed.dependencies['@deepseek-ai/cordis'] = staleVersion;
+    fixture.lock.packages['']!.dependencies!['@deepseek-ai/cordis'] = staleVersion;
+    fixture.lock.packages['node_modules/@deepseek-ai/cordis']!.version = staleVersion;
+
+    expect(() => verifyDeepSeekManagedLock(
+      fixture.root,
+      fixture.rootLock,
+      fixture.managed,
+      fixture.lock,
+      fixture.constants,
+    )).toThrow('The managed npm project must pin Cordis');
+  });
+
+  it('rejects a managed DSH direct pin outside the pinned SDK version', () => {
+    const fixture = createDeepSeekFixture();
+    fixture.managed.dependencies['@deepseek-ai/dsh-sandbox'] = '0.2.1-alpha.2';
+    fixture.lock.packages['']!.dependencies!['@deepseek-ai/dsh-sandbox'] = '0.2.1-alpha.2';
+    fixture.lock.packages['node_modules/@deepseek-ai/dsh-sandbox']!.version = '0.2.1-alpha.2';
+
+    expect(() => verifyDeepSeekManagedLock(
+      fixture.root,
+      fixture.rootLock,
+      fixture.managed,
+      fixture.lock,
+      fixture.constants,
+    )).toThrow('@deepseek-ai/dsh-sandbox must be pinned to 0.2.1-rc.5');
+  });
+
+  it('rejects a managed dependency lock with a peer outside the declared range', () => {
+    const fixture = createDeepSeekFixture();
+    fixture.lock.packages['node_modules/@deepseek-ai/cordis-plugin-loader']!.version = '1.0.5';
+
+    expect(() => verifyDeepSeekManagedLock(
+      fixture.root,
+      fixture.rootLock,
+      fixture.managed,
+      fixture.lock,
+      fixture.constants,
+    )).toThrow('@deepseek-ai/cordis-plugin-group peer @deepseek-ai/cordis-plugin-loader@~1.0.6');
+  });
+
+  it.each([false, true])('validates a transitive peer even when optional=%s', (optional) => {
+    const fixture = createDeepSeekFixture();
+    fixture.lock.packages['node_modules/transitive-plugin'] = {
+      version: '1.0.0', peerDependencies: { 'plugin-peer': '^2.0.0' },
+      peerDependenciesMeta: { 'plugin-peer': { optional } },
+    };
+    fixture.lock.packages['node_modules/plugin-peer'] = { version: '1.0.0' };
+    expect(() => verifyDeepSeekManagedLock(
+      fixture.root, fixture.rootLock, fixture.managed, fixture.lock, fixture.constants,
+    )).toThrow('transitive-plugin peer plugin-peer@^2.0.0');
+  });
+
+  it.each([false, true])('permits a missing transitive peer only when optional=%s', (optional) => {
+    const fixture = createDeepSeekFixture();
+    fixture.lock.packages['node_modules/transitive-plugin'] = {
+      version: '1.0.0', peerDependencies: { 'missing-peer': '^2.0.0' },
+      peerDependenciesMeta: { 'missing-peer': { optional } },
+    };
+    const verify = () => verifyDeepSeekManagedLock(
+      fixture.root, fixture.rootLock, fixture.managed, fixture.lock, fixture.constants,
+    );
+    if (optional) expect(verify).not.toThrow();
+    else expect(verify).toThrow('transitive-plugin peer missing-peer@^2.0.0');
+  });
+
+  it.each([false, true])('uses the nearest scoped nested peer rather than the root peer (compatible=%s)', (compatible) => {
+    const fixture = createDeepSeekFixture();
+    fixture.lock.packages['node_modules/parent/node_modules/@scope/plugin'] = {
+      version: '1.0.0', peerDependencies: { '@scope/peer': '^2.0.0' },
+    };
+    fixture.lock.packages['node_modules/parent/node_modules/@scope/peer'] = {
+      version: compatible ? '2.1.0' : '1.0.0',
+    };
+    fixture.lock.packages['node_modules/@scope/peer'] = { version: compatible ? '1.0.0' : '2.1.0' };
+    const verify = () => verifyDeepSeekManagedLock(
+      fixture.root, fixture.rootLock, fixture.managed, fixture.lock, fixture.constants,
+    );
+    if (compatible) expect(verify).not.toThrow();
+    else expect(verify).toThrow('@scope/plugin peer @scope/peer@^2.0.0');
+  });
+
+  it('rejects a present optional peer without a version', () => {
+    const fixture = createDeepSeekFixture();
+    fixture.lock.packages['node_modules/transitive-plugin'] = {
+      version: '1.0.0', peerDependencies: { 'plugin-peer': '^2.0.0' },
+      peerDependenciesMeta: { 'plugin-peer': { optional: true } },
+    };
+    fixture.lock.packages['node_modules/plugin-peer'] = {};
+    expect(() => verifyDeepSeekManagedLock(
+      fixture.root, fixture.rootLock, fixture.managed, fixture.lock, fixture.constants,
+    )).toThrow('transitive-plugin peer plugin-peer@^2.0.0');
+  });
+
   it.each([
+    ['manifest override', (fixture: ReturnType<typeof createDeepSeekFixture>) => {
+      fixture.managed.overrides!.fflate = '0.8.2';
+    }],
+    ['managed lock resolution', (fixture: ReturnType<typeof createDeepSeekFixture>) => {
+      fixture.lock.packages['node_modules/fflate']!.version = '0.8.2';
+    }],
+  ])('rejects an incorrect fflate 0.8.3 %s', (_description, makeInvalid) => {
+    const fixture = createDeepSeekFixture();
+    makeInvalid(fixture);
+
+    expect(() => verifyDeepSeekManagedLock(
+      fixture.root,
+      fixture.rootLock,
+      fixture.managed,
+      fixture.lock,
+      fixture.constants,
+    )).toThrow('fflate 0.8.3');
+  });
+
+  it.each([
+    ['manifest override', (fixture: ReturnType<typeof createDeepSeekFixture>) => {
+      fixture.managed.overrides!['@earendil-works/pi-ai'] = '1.4.0';
+    }],
+    ['managed lock resolution', (fixture: ReturnType<typeof createDeepSeekFixture>) => {
+      fixture.lock.packages['node_modules/@earendil-works/pi-ai']!.version = '1.4.0';
+    }],
+  ])('rejects a transitive Pi AI 1.4.0 %s', (_description, makeInvalid) => {
+    const fixture = createDeepSeekFixture();
+    makeInvalid(fixture);
+
+    expect(() => verifyDeepSeekManagedLock(
+      fixture.root,
+      fixture.rootLock,
+      fixture.managed,
+      fixture.lock,
+      fixture.constants,
+    )).toThrow('transitive Pi AI dependency to 1.5.0');
+  });
+
+  it.each([
+    ['root development declaration', (fixture: ReturnType<typeof createDeepSeekFixture>) => {
+      fixture.root.devDependencies['@deepseek-ai/dsh-sdk-client'] = STALE_VERSION;
+    }],
     ['root lock manifest entry', (fixture: ReturnType<typeof createDeepSeekFixture>) => {
       fixture.rootLock.packages['']!.devDependencies!['@deepseek-ai/dsh-sdk-client'] = STALE_VERSION;
     }],
     ['root lock package resolution', (fixture: ReturnType<typeof createDeepSeekFixture>) => {
-      fixture.rootLock.packages['node_modules/@deepseek-ai/dsh-sdk-client']!.version = STALE_VERSION;
+      fixture.rootLock.packages['node_modules/@deepseek-ai/dsh-sdk-client'] = { version: STALE_VERSION };
     }],
-  ])('rejects a stale %s', (_description, makeStale) => {
+    ['root DeepSeek override', (fixture: ReturnType<typeof createDeepSeekFixture>) => {
+      fixture.root.overrides = { '@deepseek-ai/dsh-http-proxy': STALE_VERSION };
+    }],
+  ])('rejects DeepSeek reintroduced through a %s', (_description, makeInvalid) => {
     const fixture = createDeepSeekFixture();
     const verify = (): void => verifyDeepSeekManagedLock(
       fixture.root,
@@ -196,7 +353,7 @@ describe('managed DeepSeek npm dependency graph', () => {
     );
 
     expect(verify).not.toThrow();
-    makeStale(fixture);
-    expect(verify).toThrow();
+    makeInvalid(fixture);
+    expect(verify).toThrow('without root DeepSeek dependencies');
   });
 });

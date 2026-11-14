@@ -69,6 +69,7 @@ export function denormalizeMergeConfig(config: MergeConfig | undefined): Record<
   if (config === undefined) return undefined;
   return {
     ...(config.workflow === undefined ? {} : { workflow: config.workflow }),
+    ...(config.prepareWorkflow === undefined ? {} : { prepare_workflow: config.prepareWorkflow }),
     ...(config.method === undefined ? {} : { method: config.method }),
     ...(config.concurrency === undefined ? {} : { concurrency: config.concurrency }),
     ...(config.autoStart === undefined ? {} : { auto_start: config.autoStart }),
@@ -869,6 +870,16 @@ export function denormalizeProviderOptions(
     if (Object.keys(sandbox).length > 0) {
       claude.sandbox = sandbox;
     }
+    const permissions: Record<string, unknown> = {};
+    if (providerOptions.claude.permissions?.deny !== undefined) {
+      permissions.deny = providerOptions.claude.permissions.deny;
+    }
+    if (providerOptions.claude.permissions?.importUserReadDeny !== undefined) {
+      permissions.import_user_read_deny = providerOptions.claude.permissions.importUserReadDeny;
+    }
+    if (Object.keys(permissions).length > 0) {
+      claude.permissions = permissions;
+    }
     if (Object.keys(claude).length > 0) {
       raw.claude = claude;
     }
@@ -881,9 +892,10 @@ export function denormalizeProviderOptions(
         : {}),
     };
   }
-  if (providerOptions.kiro?.agent !== undefined || providerOptions.kiro?.guards?.callTimeoutMs !== undefined) {
+  if (providerOptions.kiro?.agent !== undefined || providerOptions.kiro?.effort !== undefined || providerOptions.kiro?.guards?.callTimeoutMs !== undefined) {
     raw.kiro = {
       ...(providerOptions.kiro.agent !== undefined ? { agent: providerOptions.kiro.agent } : {}),
+      ...(providerOptions.kiro.effort !== undefined ? { effort: providerOptions.kiro.effort } : {}),
       ...(providerOptions.kiro.guards?.callTimeoutMs !== undefined
         ? { guards: { call_timeout_ms: providerOptions.kiro.guards.callTimeoutMs } }
         : {}),
@@ -894,6 +906,15 @@ export function denormalizeProviderOptions(
       guards: {
         ...(providerOptions.cursor.guards.callTimeoutMs !== undefined
           ? { call_timeout_ms: providerOptions.cursor.guards.callTimeoutMs }
+          : {}),
+      },
+    };
+  }
+  if (providerOptions.devin?.guards?.callTimeoutMs !== undefined) {
+    raw.devin = {
+      guards: {
+        ...(providerOptions.devin.guards.callTimeoutMs !== undefined
+          ? { call_timeout_ms: providerOptions.devin.guards.callTimeoutMs }
           : {}),
       },
     };

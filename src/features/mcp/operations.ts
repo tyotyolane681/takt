@@ -8,6 +8,8 @@ import { TaskRunner } from '../../infra/task/index.js';
 import { loadRunSessionPage } from '../interactive/runSessionReader.js';
 import { jsonResult, textResult, pagedResult, MCP_TEXT_PAGE_BYTES } from './response.js';
 import { goalSummary, goalValuePage, selectGoalValue } from './goalResponse.js';
+import type { ManagerWorkflow } from '../manager/workflowSelection.js';
+import { getTaskGoalIntegrations } from './goalTaskIntegration.js';
 export { jsonResult } from './response.js';
 import {
   issueTellableRunningTask,
@@ -38,6 +40,8 @@ type SaveTaskFile = typeof defaultSaveTaskFile;
 type CreateIssueFromTaskResult = typeof defaultCreateIssueFromTaskResult;
 
 export interface McpOperationDependencies {
+  managerWorkflows?: readonly ManagerWorkflow[];
+  turnOperationId?: string;
   readOnly?: boolean;
   saveTaskFile?: SaveTaskFile;
   createIssueFromTaskResult?: CreateIssueFromTaskResult;
@@ -102,7 +106,7 @@ function findRunReadCwd(cwd: string, runSlug: string): string {
   const task = new TaskRunner(cwd)
     .listTaskStateItems()
     .find((candidate) => candidate.runSlug === runSlug);
-  if (task?.worktreePath === undefined) {
+  if (task?.worktreePath === undefined || task.mergeTask === true) {
     return cwd;
   }
   assertTaskStateWorktreeOwnership(cwd, task);
@@ -116,6 +120,8 @@ function taskSummary(cwd: string, task: ReturnType<TaskRunner['listTaskStateItem
     ...(task.goalId === undefined ? {} : { goalId: task.goalId }),
     ...(task.summary === undefined ? {} : { summary: task.summary }),
     status: task.status,
+    ...(task.mergeTask === undefined ? {} : { mergeTask: task.mergeTask, prNumber: task.prNumber }),
+    ...(task.mergeTask !== true || task.completion === undefined ? {} : { completion: task.completion }),
     ...(task.startedAt === undefined ? {} : { startedAt: task.startedAt }),
     ...(task.workflow === undefined ? {} : { workflow: task.workflow }),
   };
@@ -123,7 +129,7 @@ function taskSummary(cwd: string, task: ReturnType<TaskRunner['listTaskStateItem
     summary.runSlug = task.runSlug;
     try {
       let runCwd = cwd;
-      if (task.worktreePath !== undefined) {
+      if (task.worktreePath !== undefined && task.mergeTask !== true) {
         assertTaskStateWorktreeOwnership(cwd, task);
         runCwd = task.worktreePath;
       }
@@ -148,15 +154,18 @@ function taskSummary(cwd: string, task: ReturnType<TaskRunner['listTaskStateItem
   return summary;
 }
 
-export function listTaktTasks(
+export async function listTaktTasks(
   input: ListTasksInput,
   deps: McpOperationDependencies = {},
-): CallToolResult {
+  signal?: AbortSignal,
+): Promise<CallToolResult> {
   try {
     assertCwdAllowedByMcpRoot(input.cwd, deps.allowedProjectRoot);
     const tasks = new TaskRunner(input.cwd).listTaskStateItems();
     const offset = input.offset ?? 0;
-    const selected = tasks.slice(offset, offset + (input.limit ?? 50)).map((task) => taskSummary(input.cwd, task));
+    const page = tasks.slice(offset, offset + (input.limit ?? 50));
+    const integrations = await getTaskGoalIntegrations(input.cwd, page, signal);
+    const selected = page.map((task, index) => ({ ...taskSummary(input.cwd, task), ...integrations[index] }));
     return pagedResult('tasks', selected, tasks.length, offset);
   } catch (error) {
     return errorResult('Task list failed', error);
@@ -213,7 +222,7 @@ export function assertCwdAllowedByMcpRoot(cwd: string, allowedProjectRoot: strin
   const root = fs.realpathSync(allowedProjectRoot);
   const target = fs.realpathSync(cwd);
   const relative = path.relative(root, target);
-  if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+  if (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
     return;
   }
 

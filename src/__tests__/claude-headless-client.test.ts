@@ -231,8 +231,8 @@ describe('callClaudeHeadless', () => {
     ]);
     const executor = createManagerTurnExecutor('/tmp', { ctx: { providerType: 'claude-headless', provider: new ClaudeHeadlessProvider(), model: undefined, lang: 'en',
       mcpServers: { context: { command: 'manager-context-server' } } }, strategy: { systemPrompt: 'manager' } });
-    const running = executor.execute({ prompt: 'continue', instruction: 'continue', sessionId: 'saved-session',
-      abortSignal: new AbortController().signal, assignment: undefined, configDirectory: '/tmp/config' });
+    const running = executor.execute({ prompt: 'continue', sessionId: 'saved-session',
+      abortSignal: new AbortController().signal, assignment: undefined });
     if (tools) await expect(running).rejects.toThrow();
     else expect(await running).toMatchObject({ message: 'fresh reply', sessionId: 'fresh-session' });
     expect(spawn).toHaveBeenCalledTimes(tools ? 1 : 2);
@@ -261,8 +261,7 @@ describe('callClaudeHeadless', () => {
     const invalidateSession = vi.fn(() => invalidation);
     const executor = createManagerTurnExecutor('/tmp', { ctx: { providerType: 'claude-headless', provider: new ClaudeHeadlessProvider(), model: undefined, lang: 'en',
       mcpServers: { context: { command: 'manager-context-server' } } }, strategy: { systemPrompt: 'manager' } });
-    const running = executor.execute({ prompt: 'continue', instruction: 'continue', sessionId, abortSignal: controller.signal, assignment: undefined,
-      configDirectory: '/tmp/config', recovery: { context: 'pending revision 4', invalidateSession } });
+    const running = executor.execute({ prompt: 'continue', sessionId, abortSignal: controller.signal, assignment: undefined, recovery: { context: 'pending revision 4', invalidateSession } });
     const observed = expect(running).rejects.toThrow();
     try {
       await vi.waitFor(() => expect(when === 'running' ? spawn : invalidateSession).toHaveBeenCalledOnce());
@@ -1499,26 +1498,42 @@ describe('callClaudeHeadless', () => {
     expect(argv[i + 1]).toBe('acceptEdits');
   });
 
-  it('maps permissionMode full to bypassPermissions', async () => {
+  it.each<Partial<ClaudeHeadlessCallOptions>>([
+    { permissionMode: 'full' },
+    { bypassPermissions: true },
+    { permissionMode: 'readonly', bypassPermissions: true },
+    { permissionMode: 'full', bypassPermissions: false },
+  ])('enables CLI permission bypass for %j', async (options) => {
     stubSpawn({
       stdoutChunks: [`${JSON.stringify({ type: 'text', text: 'x' })}\n`],
       closeCode: 0,
     });
-    await callClaudeHeadless('agent', 'p', { cwd: '/tmp', permissionMode: 'full' });
+    await callClaudeHeadless('agent', 'p', { cwd: '/tmp', ...options });
     const argv = lastSpawnArgv();
     const i = argv.indexOf('--permission-mode');
     expect(argv[i + 1]).toBe('bypassPermissions');
+    expect(argv).toContain('--allow-dangerously-skip-permissions');
   });
 
-  it('maps bypassPermissions to bypassPermissions', async () => {
+  it.each<Partial<ClaudeHeadlessCallOptions>>([
+    {},
+    { bypassPermissions: false },
+    { permissionMode: 'readonly' },
+    { permissionMode: 'edit' },
+    { permissionMode: 'readonly', bypassPermissions: false },
+    { permissionMode: 'edit', bypassPermissions: false },
+  ])('does not enable CLI permission bypass for %j', async (options) => {
     stubSpawn({
       stdoutChunks: [`${JSON.stringify({ type: 'text', text: 'x' })}\n`],
       closeCode: 0,
     });
-    await callClaudeHeadless('agent', 'p', { cwd: '/tmp', permissionMode: 'readonly', bypassPermissions: true });
+    await callClaudeHeadless('agent', 'p', { cwd: '/tmp', ...options });
     const argv = lastSpawnArgv();
     const i = argv.indexOf('--permission-mode');
-    expect(argv[i + 1]).toBe('bypassPermissions');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(argv[i + 1]).not.toBe('bypassPermissions');
+    expect(argv).not.toContain('--allow-dangerously-skip-permissions');
+    expect(argv).not.toContain('--dangerously-skip-permissions');
   });
 
   it('passes --model when set', async () => {
@@ -1903,6 +1918,96 @@ describe('callClaudeHeadless', () => {
         allowUnsandboxedCommands: true,
         excludedCommands: ['./gradlew', 'npm test'],
       },
+    });
+  });
+
+  describe('deny rules via --settings JSON', () => {
+    const denyRules = ['Read(./.env)', 'Read(~/.ssh/**)'];
+
+    function readSettingsArg(): Record<string, unknown> {
+      const argv = lastSpawnArgv();
+      const settingsIndex = argv.indexOf('--settings');
+      expect(settingsIndex).toBeGreaterThanOrEqual(0);
+      return JSON.parse(argv[settingsIndex + 1]!) as Record<string, unknown>;
+    }
+
+    it('passes deny rules as permissions.deny', async () => {
+      stubSpawn({
+        stdoutChunks: [`${JSON.stringify({ type: 'text', text: 'x' })}\n`],
+        closeCode: 0,
+      });
+
+      await callClaudeHeadless('agent', 'p', { cwd: '/tmp', denyRules });
+
+      expect(readSettingsArg()).toEqual({ permissions: { deny: denyRules } });
+    });
+
+    it('keeps the sandbox settings next to the deny rules', async () => {
+      stubSpawn({
+        stdoutChunks: [`${JSON.stringify({ type: 'text', text: 'x' })}\n`],
+        closeCode: 0,
+      });
+
+      await callClaudeHeadless('agent', 'p', {
+        cwd: '/tmp',
+        denyRules,
+        sandbox: { allowUnsandboxedCommands: true, excludedCommands: ['./gradlew'] },
+      });
+
+      expect(readSettingsArg()).toEqual({
+        sandbox: { allowUnsandboxedCommands: true, excludedCommands: ['./gradlew'] },
+        permissions: { deny: denyRules },
+      });
+    });
+
+    it('keeps the deny rules while ambient settings stay disabled in strict-readonly isolation', async () => {
+      stubSpawn({
+        stdoutChunks: [`${JSON.stringify({ type: 'text', text: 'x' })}\n`],
+        closeCode: 0,
+      });
+
+      await callClaudeHeadless('judge', 'p', {
+        cwd: '/tmp',
+        internalAgentIsolation: 'strict-readonly',
+        allowedTools: [],
+        denyRules,
+      });
+
+      const argv = lastSpawnArgv();
+      expect(argv).toEqual(expect.arrayContaining(['--tools', '', '--setting-sources', '']));
+      expect(readSettingsArg()).toEqual({ permissions: { deny: denyRules } });
+    });
+
+    it('keeps the readonly artifact Read hook next to the deny rules', async () => {
+      stubSpawn({
+        stdoutChunks: [`${JSON.stringify({ type: 'text', text: 'x' })}\n`],
+        closeCode: 0,
+      });
+
+      await callClaudeHeadless('selector', 'read verification files', {
+        cwd: '/tmp',
+        internalAgentIsolation: 'strict-readonly',
+        allowReadonlyFileRead: true,
+        readonlyFileReadPaths: [fileURLToPath(import.meta.url)],
+        allowedTools: ['Read'],
+        permissionMode: 'readonly',
+        denyRules,
+      });
+
+      const settings = readSettingsArg();
+      expect(settings.permissions).toEqual({ deny: denyRules });
+      expect((settings.hooks as { PreToolUse: Array<{ matcher: string }> }).PreToolUse[0]).toMatchObject({ matcher: 'Read' });
+    });
+
+    it('does not pass --settings when no deny rules, sandbox, or readonly hook are requested', async () => {
+      stubSpawn({
+        stdoutChunks: [`${JSON.stringify({ type: 'text', text: 'x' })}\n`],
+        closeCode: 0,
+      });
+
+      await callClaudeHeadless('agent', 'p', { cwd: '/tmp' });
+
+      expect(lastSpawnArgv()).not.toContain('--settings');
     });
   });
 

@@ -5,7 +5,7 @@ import type {
   ProviderActivityCallback,
   StreamCallback,
 } from '../../shared/types/provider.js';
-import type { PermissionHandler, SkillPermissionHandler, AskUserQuestionHandler, ToolPermissionDecisionHandler } from '../../core/workflow/types.js';
+import type { PermissionHandler, SkillPermissionHandler, AskUserQuestionHandler } from '../../core/workflow/types.js';
 import type { PreparedProviderMcp } from './mcp/types.js';
 
 export interface AgentSetup {
@@ -20,6 +20,8 @@ export interface ProviderImageAttachment {
 
 export interface ProviderCallOptions {
   cwd: string;
+  /** TAKT-owned external context directories OpenCode may read for this run. */
+  openCodeExternalDirectories?: readonly string[];
   /** The caller owns session recovery; provider retries must not replay a turn. */
   callerManagedSession?: true;
   /** Keep supplied prepared MCP alive until the caller finishes all attempts. */
@@ -53,11 +55,13 @@ export interface ProviderCallOptions {
   preparedMcp?: PreparedProviderMcp;
   maxTurns?: number;
   permissionMode?: PermissionMode;
+  /** Delegate permission decisions to the provider's AI reviewer, when supported. */
+  aiReviewPermissions?: boolean;
+  edit?: boolean;
   providerOptions?: StepProviderOptions;
   onStream?: StreamCallback;
   onActivity?: ProviderActivityCallback;
   onPermissionRequest?: PermissionHandler;
-  onToolPermissionDecision?: ToolPermissionDecisionHandler;
   onSkillPermissionRequest?: SkillPermissionHandler;
   onAskUserQuestion?: AskUserQuestionHandler;
   bypassPermissions?: boolean;
@@ -78,6 +82,8 @@ export interface ProviderCallOptions {
 export interface ProviderCompactSessionOptions {
   cwd: string;
   sessionId: string;
+  /** TAKT-owned external context directories OpenCode may read for this run. */
+  openCodeExternalDirectories?: readonly string[];
   model?: string;
   /** Internal workflow capability for resolving an OpenCode runtime default. */
   allowDefaultModel?: boolean;
@@ -88,6 +94,8 @@ export interface ProviderCompactSessionOptions {
 
 export interface ProviderAgent {
   call(prompt: string, options: ProviderCallOptions): Promise<AgentResponse>;
+  /** Resume the same provider session once after a Phase 1 context_compacted event. */
+  recoverFromCompaction?(prompt: string, options: ProviderCallOptions): Promise<AgentResponse>;
 }
 
 export interface Provider {

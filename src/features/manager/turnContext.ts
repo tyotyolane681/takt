@@ -1,6 +1,5 @@
 import { join } from 'node:path';
 import type { Goal } from '../../infra/goals/schema.js';
-import type { ManagerEvent } from '../../infra/goals/events.js';
 import type { TaskState } from '../../infra/task/types.js';
 import { goalSummary } from '../mcp/goalResponse.js';
 import { truncateUtf8 } from '../../shared/utils/utf8.js';
@@ -60,22 +59,4 @@ export function buildGoalMemory(repositories: readonly {
     if (repository.goalCount !== undefined && repository.goalCount > (repository.goals?.length ?? 0)) truncated = true;
   }
   return serialize();
-}
-
-export function buildGoalTurnContext(cwd: string, goal: Goal, event: ManagerEvent, tasks: readonly TaskState[]): string {
-  const observedAt = new Date().toISOString();
-  const lastProgressAt = goal.workLog.filter((record) => record.kind !== 'patrol').at(-1)?.recordedAt ?? goal.createdAt;
-  return JSON.stringify({
-    repositoryDirectory: cwd,
-    event,
-    goal: buildManagerGoalSummary(cwd, goal, tasks),
-    tasks: tasks.filter((task) => task.goalId === goal.id),
-    ...(event.kind === 'patrol' ? {
-      patrol: {
-        observedAt,
-        lastProgressAt,
-      },
-    } : {}),
-    references: { goal: join(cwd, '.takt', 'goals', goal.id, 'goal.json'), tasks: join(cwd, '.takt', 'tasks.yaml') },
-  });
 }

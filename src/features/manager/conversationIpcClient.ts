@@ -1,43 +1,46 @@
-import { createConnection, type Socket } from 'node:net';
+import { getGlobalConfigDir } from '../../infra/config/paths.js';
+import { resolveGitRepositoryDirectory } from '../../infra/task/repositoryDirectory.js';
+import { resolveCurrentManagerAssignment } from './assignment.js';
+import type { Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod/v4';
-import { conversationIpcEndpoint, DaemonIpcStateSchema, ipcStateMatchesOwner, readDaemonIpcState,
-  resolveDaemonConfigDirectory } from '../../infra/daemon/ipcEndpoint.js';
-import { isDaemonOwnerRunning, readDaemonOwner } from '../../infra/daemon/owner.js';
+import { resolveDaemonConfigDirectory } from '../../infra/daemon/ipcEndpoint.js';
 import type { ConversationAssignment } from '../../infra/conversations/schema.js';
 import { ConversationFrameDecoder, encodeConversationFrame, MAX_CONVERSATION_FRAME_BYTES } from '../daemon/conversationFrames.js';
 import { ensureDaemon } from '../daemon/lifecycle.js';
 import { createTuiConversationPort } from './tuiConversationPort.js';
-import type { ConversationCommand, ConversationOpen, ConversationState, PortOutput, SnapshotItem, Submission } from './conversationPort.js';
+import type { ConversationCommand, ConversationOpen, ConversationPort, ConversationState, OutputVersion, PortOutput, Submission } from './conversationPort.js';
+import { snapshotItemKey, orderSnapshotItems, type SnapshotDisplayItem } from './snapshotChanges.js';
 import { ConversationReadMetadataSchema, ConversationTransferReceiver } from './conversationTransferReceiver.js';
 import type { AssistantCliOverrides } from '../../core/config/provider-resolution.js';
+import type { ToolActivityTurnState } from '../../shared/tool-activity/types.js';
 
 const responseSchema = z.object({ protocolVersion: z.literal(1), type: z.literal('response'), requestId: z.string(),
   result: z.unknown().optional(), error: z.object({ kind: z.literal('error'), code: z.string(), message: z.string() }).strict().optional() }).strict()
   .refine((response) => Object.hasOwn(response, 'result') !== (response.error !== undefined));
 const submissionSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('accepted'), operationId: z.uuid() }).strict(),
-  z.object({ kind: z.literal('busy'), operationId: z.uuid() }).strict(),
+  z.object({ kind: z.literal('accepted'), operationId: z.uuid(), eventId: z.string().min(1).max(128).optional(), acceptedSequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), queuedMessageCount: z.number().int().positive().optional() }).strict(),
   z.object({ kind: z.literal('error'), code: z.string(), message: z.string() }).strict(),
 ]);
 export interface ConversationClientSnapshot {
   connection: 'connecting' | 'connected' | 'disconnected';
   readStatus: 'reading' | 'complete' | 'incomplete';
   state: ConversationState | null;
-  items: readonly Exclude<SnapshotItem, { kind: 'state' }>[];
+  items: readonly SnapshotDisplayItem[];
   error: string | null;
 }
 type Output = Exclude<PortOutput, { kind: 'snapshot' }>;
-type DisplayItem = Exclude<SnapshotItem, { kind: 'state' }>;
 type Request = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 type ActiveRead = { transferId?: string; response?: Promise<void> };
+type PendingToolHistory = { history: ToolActivityTurnState; version: OutputVersion };
 
 export class ConversationIpcClient {
   private socket: Socket | undefined;
   private requests = new Map<string, Request>();
   private listeners = new Set<() => void>();
   private outputs = new Set<(output: Output) => void>();
+  private activity: Extract<Output, { kind: 'activity' }> | undefined;
+  private pendingActivity: Extract<Output, { kind: 'activity' }> | undefined;
   private receiver: ConversationTransferReceiver | undefined;
   private resolved: ConversationOpen | undefined;
   private attachmentId: string | undefined;
@@ -45,15 +48,26 @@ export class ConversationIpcClient {
   private connecting: Promise<void> | undefined;
   private read: ActiveRead | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-  private readItems: DisplayItem[] = [];
+  private committedItems = new Map<string, SnapshotDisplayItem>();
+  private items = new Map<string, SnapshotDisplayItem>();
+  private readItems = new Map<string, SnapshotDisplayItem>();
+  private removed = new Set<string>();
+  private toolHistorySequence = -1;
+  private currentStateSequence = -1;
+  private pendingToolHistories = new Map<string, PendingToolHistory>();
+  private toolTurnBoundary: { operationId: string; generation: number | undefined; stateSequence: number } | undefined;
   private view: ConversationClientSnapshot = { connection: 'connecting', readStatus: 'reading', state: null, items: [], error: null };
-  private configDirectory = resolveDaemonConfigDirectory();
 
-  constructor(private readonly assignment: ConversationAssignment, private readonly agentOverrides?: AssistantCliOverrides) {}
+  constructor(private readonly assignment: ConversationAssignment, private readonly agentOverrides?: AssistantCliOverrides,
+    private readonly options?: { port: ConversationPort<ConversationAssignment>; reconnect: boolean }) {}
 
   getSnapshot = (): ConversationClientSnapshot => this.view;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
-  onOutput(listener: (output: Output) => void): () => void { this.outputs.add(listener); return () => { this.outputs.delete(listener); }; }
+  onOutput(listener: (output: Output) => void): () => void {
+    this.outputs.add(listener);
+    if (this.view.connection === 'connected' && this.activity !== undefined) listener(this.activity);
+    return () => { this.outputs.delete(listener); };
+  }
 
   connect(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('Conversation client is closed'));
@@ -111,58 +125,199 @@ export class ConversationIpcClient {
   }
 
   private update(change: Partial<ConversationClientSnapshot>): void {
+    const previousConnection = this.view.connection;
     this.view = { ...this.view, ...change };
+    const running = this.view.state?.running;
+    const tools = this.committedItems.get('tool_history');
+    if (running != null && tools?.kind === 'tool_history'
+      && (tools.history.operationId !== running.operationId || tools.history.generation !== running.generation)) {
+      this.committedItems.delete('tool_history');
+      this.items.delete('tool_history');
+      this.readItems.delete('tool_history');
+      this.view = { ...this.view, items: orderSnapshotItems(this.items) };
+    }
+    if (this.view.connection === 'disconnected' || running?.operationId !== this.activity?.operationId
+      || running?.generation !== this.activity?.generation) this.activity = undefined;
+    let activityResumed = false;
+    if (this.view.connection === 'disconnected' || change.state === null || change.state?.running === null) {
+      this.pendingActivity = undefined;
+    } else if (this.pendingActivity !== undefined && running?.operationId === this.pendingActivity.operationId
+      && running.generation === this.pendingActivity.generation) {
+      this.activity = this.pendingActivity;
+      this.pendingActivity = undefined;
+      activityResumed = true;
+    }
+    this.applyPendingToolHistories();
     for (const listener of this.listeners) listener();
+    if ((previousConnection !== 'connected' || activityResumed) && this.view.connection === 'connected' && this.activity !== undefined) {
+      for (const listener of this.outputs) listener(this.activity);
+    }
+  }
+
+  private isPreviousToolTurn(history: ToolActivityTurnState, version: OutputVersion): boolean {
+    const boundary = this.toolTurnBoundary;
+    return boundary !== undefined && version.stateSequence < boundary.stateSequence
+      && (history.operationId !== boundary.operationId || history.generation !== boundary.generation);
+  }
+
+  private acceptToolHistory(history: ToolActivityTurnState, version: OutputVersion, live: boolean): boolean {
+    if (this.isPreviousToolTurn(history, version)) return false;
+    const running = this.view.state?.running;
+    const matchesRunning = running != null && history.operationId === running.operationId
+      && history.generation === running.generation;
+    if (live && version.stateSequence > this.currentStateSequence && !matchesRunning) {
+      const key = JSON.stringify([history.operationId, history.generation]);
+      const previous = this.pendingToolHistories.get(key);
+      if (previous === undefined || history.history.sequence >= previous.history.history.sequence) {
+        this.pendingToolHistories.set(key, { history, version });
+      }
+      return false;
+    }
+    if (running != null && (history.operationId !== running.operationId || history.generation !== running.generation)) return false;
+    const previous = this.committedItems.get('tool_history');
+    const current = previous?.kind === 'tool_history' ? previous.history : undefined;
+    const sameTurn = current?.operationId === history.operationId && current.generation === history.generation;
+    if (!sameTurn && version.stateSequence < this.toolHistorySequence) return false;
+    if (current !== undefined) {
+      if (current.operationId === history.operationId && history.generation < current.generation
+        || sameTurn && (history.history.sequence < current.history.sequence || current.finished && !history.finished)) return false;
+    }
+    if (live) {
+      this.toolHistorySequence = Math.max(this.toolHistorySequence, version.stateSequence);
+      this.removed.delete('tool_history');
+    }
+    if (current !== undefined && JSON.stringify(history) === JSON.stringify(current)) return false;
+    const item = { kind: 'tool_history' as const, history };
+    if (live) {
+      this.committedItems.set('tool_history', item);
+      this.items.set('tool_history', item);
+    }
+    this.readItems.set('tool_history', item);
+    return true;
+  }
+
+  private applyPendingToolHistories(): void {
+    const running = this.view.state?.running;
+    let changed = false;
+    for (const [key, pending] of this.pendingToolHistories) {
+      const matchesRunning = running != null && pending.history.operationId === running.operationId
+        && pending.history.generation === running.generation;
+      const finishedWithoutRunning = running == null && pending.history.finished;
+      if ((matchesRunning || finishedWithoutRunning) && this.acceptToolHistory(pending.history, pending.version, true)) {
+        changed = true;
+        this.pendingToolHistories.delete(key);
+        for (const listener of this.outputs) listener({ kind: 'tool_history', history: pending.history });
+      } else if (this.isPreviousToolTurn(pending.history, pending.version)
+        || pending.version.stateSequence <= this.currentStateSequence) {
+        this.pendingToolHistories.delete(key);
+      }
+    }
+    if (changed) this.view = { ...this.view, items: orderSnapshotItems(this.items) };
   }
 
   private async open(): Promise<void> {
     this.update({ connection: 'connecting', readStatus: 'reading' });
-    await ensureDaemon();
-    if (this.closed) return;
-    const owner = readDaemonOwner(this.configDirectory);
-    const state = readDaemonIpcState(this.configDirectory);
-    if (owner === undefined || state === undefined || !isDaemonOwnerRunning(owner) || !ipcStateMatchesOwner(state, owner)
-      || state.endpoint !== conversationIpcEndpoint(this.configDirectory, process.platform, process.getuid?.() ?? 0)) throw new Error('Daemon IPC identity mismatch');
-    const port = createTuiConversationPort(this.configDirectory, { deliver: async () => ({ kind: 'unavailable', reason: 'IPC delivery only' }) });
-    const resolved = await port.resolve(this.assignment);
+    const configDirectory = await resolveDaemonConfigDirectory(getGlobalConfigDir());
+    const port = this.options?.port ?? createTuiConversationPort(configDirectory, { deliver: async () => ({ kind: 'unavailable', reason: 'IPC delivery only' }) });
+    const selected = this.options?.port !== undefined || this.assignment.kind === 'daemon' ? this.assignment
+      : await resolveCurrentManagerAssignment(this.assignment.kind === 'repository'
+        ? { kind: 'repository', repositoryDirectory: await resolveGitRepositoryDirectory(this.assignment.repositoryDirectory) }
+        : this.assignment, configDirectory);
+    const resolved = await port.resolve(selected);
     if (this.closed) return;
     if (this.resolved?.conversationId !== resolved.conversationId) {
+      this.committedItems.clear();
+      this.items.clear();
       this.update({ state: null, items: [] });
       this.receiver = new ConversationTransferReceiver(resolved.conversationId, {
-        state: (next) => this.update({ state: next }),
-        item: (item) => {
-          const key = this.itemKey(item);
-          if (this.readItems.some((current) => this.itemKey(current) === key)) throw new Error('Repeated display item');
-          this.readItems.push(item);
-          const index = this.view.items.findIndex((current) => this.itemKey(current) === key);
-          if (index >= 0 && isDeepStrictEqual(this.view.items[index], item)) return;
-          const items = [...this.view.items];
-          if (index < 0) items.push(item); else items[index] = item;
-          this.update({ items });
+        state: (next, version) => {
+          this.currentStateSequence = Math.max(this.currentStateSequence, version.stateSequence);
+          const running = next.running;
+          if (running !== null) {
+            this.toolTurnBoundary = { operationId: running.operationId, generation: running.generation, stateSequence: version.stateSequence };
+            const staged = this.readItems.get('tool_history');
+            if (staged?.kind === 'tool_history'
+              && (staged.history.operationId !== running.operationId || staged.history.generation !== running.generation)) this.readItems.delete('tool_history');
+          }
+          this.update({ state: next });
         },
-        output: (output) => { for (const listener of this.outputs) listener(output); },
-        read: (readStatus, transferId) => {
+        item: (item, _transferId, version) => {
+          if (item.kind === 'tool_history') {
+            if (!this.acceptToolHistory(item.history, version, false)) {
+              const current = this.committedItems.get('tool_history');
+              if (current !== undefined) this.readItems.set('tool_history', current);
+            }
+            return;
+          }
+          const key = snapshotItemKey(item);
+          this.readItems.set(key, item);
+          this.items.set(key, item);
+        },
+        remove: (key, _transferId, version) => {
+          if (key !== 'tool_history' || this.toolHistorySequence <= version.stateSequence) this.removed.add(key);
+        },
+        output: (output, version) => {
+          if (output.kind === 'tool_history') {
+            if (!this.acceptToolHistory(output.history, version, true)) return;
+            this.update({ items: orderSnapshotItems(this.committedItems) });
+          }
+          if (output.kind === 'activity') {
+            const running = this.view.state?.running;
+            if (running?.operationId !== output.operationId || running.generation !== output.generation) {
+              this.pendingActivity = output;
+              return;
+            }
+            this.activity = output;
+            if (this.view.connection !== 'connected') return;
+          } else if (output.kind === 'result') {
+            if (output.operationId === this.activity?.operationId) this.activity = undefined;
+            if (output.operationId === this.pendingActivity?.operationId) this.pendingActivity = undefined;
+          }
+          for (const listener of this.outputs) listener(output);
+        },
+        read: (readStatus, transferId, mode, version) => {
           if (readStatus === 'reading') {
-            this.readItems = [];
+            this.readItems.clear();
+            this.removed.clear();
+            this.items = new Map(this.committedItems);
             this.read ??= {};
             this.read.transferId = transferId;
           } else if (this.read?.transferId === transferId) {
+            if (readStatus === 'complete') {
+              const next = mode === 'initial' ? new Map<string, SnapshotDisplayItem>() : new Map(this.committedItems);
+              for (const [key, item] of this.readItems) {
+                if (item.kind === 'tool_history' && this.isPreviousToolTurn(item.history, version)) continue;
+                next.set(key, item);
+              }
+              for (const key of this.removed) next.delete(key);
+              const history = this.committedItems.get('tool_history');
+              if (history !== undefined && this.toolHistorySequence > version.stateSequence) next.set('tool_history', history);
+              this.toolHistorySequence = Math.max(this.toolHistorySequence, version.stateSequence);
+              this.committedItems = next;
+              this.items = new Map(next);
+            }
             this.read.transferId = undefined;
             if (this.read.response === undefined) this.read = undefined;
           }
           if (readStatus === 'reading' && this.view.readStatus === 'complete') return;
           this.update({
             readStatus,
-            ...(readStatus === 'complete' ? { items: this.readItems } : {}),
+            ...(readStatus === 'reading' ? {} : { items: orderSnapshotItems(this.items) }),
           });
         },
       });
     }
     this.resolved = resolved;
-    const socket = createConnection(state.endpoint);
+    const socket = await ensureDaemon({ retainConnection: true });
+    if (this.closed) { socket.destroy(); return; }
     this.socket = socket;
+    if (socket.destroyed) throw new Error('Daemon disconnected before opening conversation');
     const decoder = new ConversationFrameDecoder();
-    let authenticated = false;
+    this.toolHistorySequence = -1;
+    this.currentStateSequence = -1;
+    this.pendingToolHistories.clear();
+    this.toolTurnBoundary = undefined;
+    this.receiver!.authenticated();
     socket.on('data', (chunk: Buffer) => {
       if (this.socket !== socket || socket.destroyed) return;
       try {
@@ -179,7 +334,6 @@ export class ConversationIpcClient {
               catch (error) { pending.reject(error instanceof Error ? error : new Error('Invalid IPC response')); throw error; }
             }
           } else {
-            if (!authenticated) throw new Error('IPC event before authentication');
             this.receiver!.receive(value);
           }
         }
@@ -187,17 +341,7 @@ export class ConversationIpcClient {
     });
     socket.on('error', (error) => { if (this.socket === socket) this.disconnect(error); });
     socket.once('close', () => { if (this.socket === socket) this.disconnect(new Error('Daemon disconnected')); });
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { socket.destroy(); reject(new Error('IPC connection timed out')); }, 5_000);
-      socket.once('connect', () => { clearTimeout(timer); resolve(); });
-      socket.once('error', (error) => { clearTimeout(timer); reject(error); });
-    });
-    await this.request('hello', { capability: state.capability }, (value) => {
-      const hello = z.object({ owner: DaemonIpcStateSchema.shape.owner }).strict().parse(value);
-      if (!ipcStateMatchesOwner({ ...state, owner: hello.owner }, owner)) throw new Error('Daemon hello identity mismatch');
-      this.receiver!.authenticated();
-      authenticated = true;
-    });
+    socket.resume();
     await this.requestRead('open', { ...resolved, ...(this.agentOverrides === undefined ? {} : { agentOverrides: this.agentOverrides }) }, (value) => {
       const result = z.object({ attachmentId: z.uuid(), read: ConversationReadMetadataSchema }).strict().parse(value);
       this.attachmentId = result.attachmentId;
@@ -241,24 +385,17 @@ export class ConversationIpcClient {
     });
   }
 
-  private itemKey(item: DisplayItem): string {
-    switch (item.kind) {
-      case 'assignment': return 'assignment';
-      case 'goal': return JSON.stringify(['goal', item.goal.repositoryDirectory, item.goal.id]);
-      case 'inquiry': return JSON.stringify(['inquiry', item.inquiry.target, item.inquiry.question.id]);
-      case 'notice': return JSON.stringify(['notice', item.notice.repositoryDirectory, item.notice.goalId, item.notice.id]);
-      case 'display_event': return JSON.stringify(['display_event', item.event.id]);
-    }
-  }
-
   private disconnect(error: Error): void {
+    const socket = this.socket;
+    this.socket = undefined;
+    socket?.destroy();
     for (const pending of this.requests.values()) { clearTimeout(pending.timer); pending.reject(error); }
     this.requests.clear();
     this.attachmentId = undefined;
     this.read = undefined;
     this.receiver?.disconnect();
     this.update({ connection: 'disconnected', readStatus: 'incomplete', error: error.message });
-    if (!this.closed && this.reconnectTimer === undefined) {
+    if (!this.closed && this.options?.reconnect !== false && this.reconnectTimer === undefined) {
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = undefined;
         void this.connect().catch((next: Error) => this.disconnect(next));

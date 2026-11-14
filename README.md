@@ -102,7 +102,7 @@ If this is your first run, configure a provider in `~/.takt/config.yaml` or use 
 
 ## CodeRabbit Review Loop
 
-On GitHub, run `takt caccia <PR-number>` to wait for CodeRabbit reviews, handle unresolved bot threads in isolated clones, and keep a decision report for each iteration. Merge workflows call the loop through an explicit `caccia` effect. `caccia.enabled` controls whether that effect waits for CodeRabbit and defaults to false. Push and PR publication do not start Caccia implicitly. See the [CLI reference](./docs/cli-reference.md#takt-caccia) and [configuration guide](./docs/configuration.md#caccia-review-loop).
+On GitHub, run `takt caccia <PR-number>` to wait for CodeRabbit reviews, handle unresolved bot threads in isolated clones, and keep a decision report for each iteration. Merge workflows call the loop through an explicit `caccia` effect. `caccia.enabled` controls whether that effect waits for CodeRabbit and defaults to false. Git push itself does not start Caccia. When enabled, worktree tasks with `auto_pr` and Pipeline with `--auto-pr` also run Caccia after successful PR publication, subject to the exclusions and ordering rules in the configuration guide. See the [CLI reference](./docs/cli-reference.md#takt-caccia) and [configuration guide](./docs/configuration.md#caccia-review-loop).
 
 ### Video Tutorial
 
@@ -150,6 +150,7 @@ These providers require an external CLI:
 - `copilot` — [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli)
 - `cursor` — [Cursor Agent](https://docs.cursor.com/)
 - `kiro` — [Kiro CLI](https://kiro.dev/docs/cli/headless/)
+- `devin` — [Devin CLI](https://devin.ai/)
 
 Optional:
 
@@ -306,7 +307,8 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `takt run` | Execute all pending tasks |
 | `takt watch` | Monitor the task queue and auto-execute pending tasks (resident process) |
 | `takt ui` | Open the experimental Viewer-first Web UI on `http://127.0.0.1:20525` |
-| `takt manager` | Open the experimental goal conversation TUI connected to the daemon. Use `Ctrl+R` for inquiries and `Ctrl+G` for ongoing goals; both keys work while manager is processing. Type `/make-goal` in the input box and press `Enter` to create a goal proposal from the current conversation. Even when a proposal is already displayed, this only regenerates it; it does not register the goal. Use `↑` Approve / `↓` Continue / `Enter` Confirm, then select Approve and press `Enter` to register it. Typing `/` shows `/make-goal` as a completion candidate; `Tab` accepts it. Other input starting with `/` is sent as a regular message. If material is insufficient, continue the conversation. To add, remove, or rename a managed repository, ask in the conversation. Behavior, settings, and saved data formats may change without notice. Automatically queues and runs tasks, incurring provider API costs. With claude (claude-sdk) or codex, AI reviews tool use before execution. On startup, manager starts the daemon if needed and waits until it is ready; the daemon runs conversations, processes events, and performs patrols. Stop the daemon with `takt daemon stop` |
+| `takt manager` | Open the experimental goal conversation TUI connected to the daemon. Use `Ctrl+R` for inquiries and `Ctrl+G` for ongoing goals; both keys work while manager is processing. Type `/make-goal` in the input box and press `Enter` to create a goal proposal from the current conversation. Even when a proposal is already displayed, this only regenerates it; it does not register the goal. Use `↑↓` to choose **Register goal** or **Return to conversation without registering**, then press `Enter`. The default returns to the conversation and dismisses the proposal. Select **Register goal** to register it. Typing `/` shows `/make-goal` as a completion candidate; `Tab` accepts it. Other input starting with `/` is sent as a regular message. If material is insufficient, continue the conversation. To add, remove, or rename a managed repository, ask in the conversation. Behavior, settings, and saved data formats may change without notice. Automatically queues and runs tasks, incurring provider API costs. With claude (claude-sdk) or codex, AI reviews tool use before execution. On startup, manager starts the daemon if needed and waits until it is ready; the daemon admits, saves, routes, and observes events; each conversation has a child process for its turns. Stop the daemon with `takt daemon stop` |
+| `takt director` | Open the experimental conversation TUI for oversight across managers; see [Director](#director-experimental) |
 | `takt list` | Manage task branches (merge, retry, requeue, stop, force-fail, instruct, delete) |
 | `takt #N` | Use a GitHub Issue as the initial input for a task |
 | `takt merge` | Review, fix, and merge pull requests with a workflow |
@@ -318,13 +320,17 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `takt workflow inspect` | Inspect a workflow's configuration and resolution sources |
 | `takt repertoire add` | Install a repertoire package from GitHub |
 
-Manager conversations run in the daemon; the TUI sends requests and displays results. Once a turn is accepted, it continues in the daemon even if you close the TUI. Reopening manager for the same repository or workspace, or opening a second TUI for that assignment, connects to the same conversation. Any goal proposal awaiting approval is shown again and can be registered by selecting Approve and pressing `Enter`.
+Manager conversations run in the daemon; the TUI sends requests and displays results. Once a turn is accepted, it continues in the daemon even if you close the TUI. Reopening manager for the same repository or workspace, or opening a second TUI for that assignment, connects to the same conversation. Any goal proposal awaiting approval is shown again and can be registered by selecting **Register goal** and pressing `Enter`.
 
-Previous messages and replies are not redisplayed when you reopen the TUI. TAKT does not save the conversation text; conversation history is managed by the provider's session. Pending goal summaries and goal records are saved separately.
+Previous messages and replies are not redisplayed when you reopen the TUI. Conversation history is managed by the provider's session. TAKT saves message text and full results in `daemon-events` and retains them after completion. These records are not automatically deleted. Pending goal summaries and goal records are saved separately.
 
-If another message is submitted while the same conversation is processing, it is rejected as busy and will not run later. Submit it again after processing finishes. After a daemon restart, a turn that was running is treated as interrupted, and you can send a new message.
+The daemon is event driven. It has two queues: human input and other events. Human input takes priority when starting the next turn; each queue preserves acceptance order. A conversation shares one session, retaining context learned from events for later human messages. Messages, approvals, and inquiry answers can be accepted and saved while a turn is running; snapshot reads and interruption remain available. accepted means durable admission, not completion. Interrupting the active turn preserves waiting input. After failure or interruption, manager checks current state and side effects, then decides whether to resume, correct and retry, or submit new work.
 
 The daemon does not exit automatically while a TUI is connected or an accepted conversation operation is running. To stop it explicitly, use `takt daemon stop`.
+
+**Slack conversations:** You can also talk to the same manager conversation from a configured Slack channel. Replies stay in the thread where you sent the message; TUI replies are not forwarded to Slack. See [Slack conversations with manager](./docs/configuration.md#slack-conversations-with-manager) for the Socket Mode App manifest, token environment variables, repository settings, and how to answer inquiries. Completion notices continue to use the separate `TAKT_NOTIFY_WEBHOOK` Incoming Webhook.
+
+In a conversation thread, send `/make-goal` to create a proposal. Use **Register goal** or **Return to conversation without registering**; buttons on an outdated proposal no longer work.
 
 See the [CLI Reference](./docs/cli-reference.md) for all commands and options.
 
@@ -361,26 +367,14 @@ Before processing each project's events, the daemon recovers interrupted tasks t
 
 The ordinary `takt` assistant conversation has the same read-only task-state view when its provider supports MCP. Use `/go` to turn a new task into an execution or queued task, `/tell` to select and confirm an additional instruction for a running worktree clone, and `/requeue` or `/retry` to return a failed task to the queue after confirmation.
 
-### Manager tool permissions
+### Manager judgment and work
 
-Add sensitive paths in global `~/.takt/config.yaml` or project `.takt/config.yaml`:
+Manager is an engineer familiar with TAKT, responsible for completing assigned goals. It investigates, implements, verifies, performs Git operations and delegates when useful. It uses normal provider tools and assigned MCP servers, preserving configured provider options. Permissions default to `auto`. For Claude (`claude` / `claude-sdk`) and Codex, set `manager.permission` or provider-specific `manager.provider_permissions` to `full` for unrestricted execution. Other providers behave like `full` under `auto`. A provider-specific `manager.provider_permissions` entry takes precedence over `manager.permission`, so an `auto` entry keeps that provider in `auto` even when `manager.permission: full` is set. There is no separate manager-specific permission judge, read-scope review or execution control based on saved approvals. Use `manager.workflows` and `manager.default_workflow` to select the workflows available for new development tasks; see the [configuration guide](./docs/configuration.md#manager-task-workflows).
 
-```yaml
-manager:
-  sensitive_paths: [private, config/credentials.json]
-```
+Facet policy requires explicit human instructions identifying the target and effect for integration into a target branch, force pushes, deletion of remote branches or unsaved results, goal aborts and new posts outside the requested scope. Direct messages, director relays and saved continuing instructions are supported. PR creation, ordinary pushes and configured notifications are part of requested work. PR merge instructions include deletion of that PR branch; instructions already given are not reconfirmed. Reading secret values requires a human instruction covering that need, and secret values must not appear in responses, records or artifacts.
 
-Both lists extend the defaults, including when either list is empty. Entries name files or directories; see [sensitive read targets](./docs/configuration.md#manager-sensitive-read-targets).
+Legacy `manager.sensitive_paths` and runtime `provider.targets.internal_agents.manager-permission-judge` are deprecated. Existing configuration files remain readable, but these settings are ignored and have no effect. Old permission Markdown and approval answers do not decide execution. Historical inquiry records remain readable and withdrawable.
 
-In `takt manager` conversations with the claude (claude-sdk) or codex provider, an AI permission judge reviews tool use before execution instead of asking a person to approve every operation. It decides to allow, deny with a reason, or ask a person. This review is enabled by default and has no on/off setting.
-
-With claude (claude-sdk), `Read` runs without review only when its resolved target is a readable, non-sensitive, ordinary file inside the manager's assigned repositories. `Glob` takes a directory as its search root and runs without review only when the candidate files, together with the directories and symlinks it walks, are inside the assignment, contain no sensitive target, and can be confirmed safe to search. `Grep` runs without review for searches over ordinary files that meet the same conditions as `Read`, and for directory searches that pass the same safety check as `Glob`. The assignment is the workspace member repositories, or the current repository when there is no workspace. Relative paths use the tool's actual working directory; `~`, `..`, and symlinks are resolved before comparison. Targets outside the assignment, sensitive files, and targets or search ranges that cannot be determined are sent to the judge. Sensitive defaults cover `.env`, `.env.*`, SSH private key names (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`), and `*.key`, `*.pem`, `*.crt`, `*.cer`, `*.p12`, `*.pfx`. Global and project `manager.sensitive_paths` add to these defaults and cannot remove them. `ToolSearch` and the manager's own TAKT MCP tools continue to run without review. With Codex, only the manager's own TAKT MCP tools run without review; all built-in tools are reviewed. For both providers, all other tools, including unknown tools and external MCP tools, are reviewed when no saved approval applies. Shell execution, including `Bash`, is reviewed every time no saved approval applies, even when the command appears to be read-only. Launching another agent through `Task` or `Agent` is always denied, as are instructions to launch another AI command-line agent through `Bash`. With Codex, `spawn_agent` is also always denied without invoking the permission judge.
-
-When an operation is denied, the reason returns to the manager, which takes it into account in its next response. An “ask a person” decision also denies the operation for now and notifies the TUI and Slack that human confirmation is pending, with the reason. The operation is not held open while waiting. These notifications use existing kinds; no new notification kind is added.
-
-Set the judge's provider and model through `provider.targets.internal_agents.manager-permission-judge` in `runtime.yaml`. Like other internal agent seats, it accepts `profile` or `ladder`, but not `pool`. If unassigned, it uses the same provider, model, and provider options as the manager.
-
-The judge has a 30-second deadline. A timeout follows the same human confirmation flow as an “ask a person” decision: an approval inquiry is saved, the operation is stopped pending confirmation, and a notification is sent. Exceptions and invalid decision formats still deny the operation. The judgment is not retried automatically.
 
 ### Instant exec mode
 
@@ -390,12 +384,31 @@ Exec starts from the previous exec configuration, or the default configuration o
 
 See [Instant Exec Mode](./docs/cli-reference.md#instant-exec-mode) in the CLI Reference for preset resolution order, `/setup` persistence, image handling limits, and `session_key` behavior.
 
+## Director (experimental)
+
+Open the director conversation TUI in an interactive terminal:
+
+```bash
+takt director
+takt director --help
+```
+
+The daemon owns the conversation. Close and reopen the TUI to continue it; starting from another assigned repository connects to the same conversation. Previous messages and replies are not redisplayed. Director is experimental: behavior and saved data formats may change without notice. Human and event turns call the provider and incur costs; a clock alone does not trigger a model call.
+
+Manager advances goals within its repository or workspace, submits tasks, integrates results, and requests completion. Director checks goals and unanswered inquiries across all managers, notifies the human when attention is needed, and communicates through manager conversations. Human decisions remain with the human: director only relays an explicit request to merge to the responsible manager and never performs the merge itself.
+
+Messages sent through `takt_tell_manager` are saved even while manager is busy. The tool returns an operation ID and manager as soon as the message is saved, without waiting for a reply; messages are processed in saved order. Replies, failures, and interruptions are saved and shown later in the director TUI with the same operation ID. Manager listing reports unreadable projects with reasons and continues with readable managers.
+
+Set `director.slack.channel_id` and `director.slack.allowed_user_ids` in global `~/.takt/config.yaml`. See the [global config field reference](./docs/configuration.md#global-config-field-reference).
+
+**Director on Slack:** Use the same Slack App and `TAKT_SLACK_APP_TOKEN` / `TAKT_SLACK_BOT_TOKEN` as manager, invite the bot to the director channel, and restart the daemon after changing Slack settings. Configuring `director.slack` enables grouped notices and conversations with permitted users; replies stay in the original thread. See [Slack conversations with director](./docs/configuration.md#slack-conversations-with-director) for setup and [Director responsibilities](./docs/goal-management.md#director-responsibilities) for the full responsibilities and restrictions.
+
 ## Configuration
 
 Minimal `~/.takt/config.yaml`:
 
 ```yaml
-provider: claude-sdk    # claude-sdk, claude (alias), claude-headless, claude-terminal, codex, opencode, deepseek-harness, cursor, copilot, kiro, pi, or mock
+provider: claude-sdk    # claude-sdk, claude (alias), claude-headless, claude-terminal, codex, opencode, deepseek-harness, cursor, copilot, kiro, devin, pi, or mock
 model: sonnet       # passed directly to provider
 language: en        # en or ja
 ```
@@ -428,6 +441,16 @@ events continue to arrive. Raise the limit with
 `provider_options.opencode.guards.call_timeout_ms` (up to 86,400,000 ms). Guard
 profiles and per-model overrides are described in
 [Provider inactivity deadline and OpenCode execution guards](./docs/configuration.md#provider-inactivity-deadline-and-opencode-execution-guards).
+
+`provider_options.claude.permissions.deny` passes Claude Code `permissions.deny` rules, such as `Read(./.env)`, to `claude-sdk` and `claude-headless`.
+`Read(` rules stop Claude's built-in file tools (Claude applies `Read` rules to tools such as Grep and Glob on a best-effort basis) and the file commands Claude Code recognizes in Bash, such as `cat` and `head`.
+They do not stop a command that reads files without naming them, such as `grep -r pattern .`, or a script that opens files itself.
+To block the shell commands Claude runs in the sandbox, and the processes they start, from accessing a path at the OS level, add a `Read(` deny rule for that path and enable the Claude Code sandbox with filesystem isolation. Do not set `sandbox.filesystem.disabled` to `true`, because that setting lets sandboxed commands read host files. Commands that run outside the sandbox, such as commands matched by `excludedCommands` or run with `allow_unsandboxed_commands`, are not blocked.
+Processes in the sandbox can still read paths that have no deny rule.
+Hooks, MCP servers, and other processes outside the sandbox are not blocked.
+Set `provider_options.claude.permissions.import_user_read_deny: true` to also import the `Read(` rules from `~/.claude/settings.json`.
+Neither key is set by default, and `claude-terminal` is not affected.
+See [Claude Code read-deny rules](./docs/configuration.md#claude-read-deny-rules).
 
 ### Dedicated provider configuration (`runtime.yaml`)
 

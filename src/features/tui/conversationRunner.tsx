@@ -1,3 +1,4 @@
+import type { InteractiveSessionRecords } from '../interactive/interactiveSessionRecords.js';
 /**
  * The conversation phase of a TUI run, without anything that decides what the
  * conversation is about.
@@ -12,7 +13,12 @@
 import { useEffect, useRef } from 'react';
 import { Text, useInput } from 'ink';
 import { getLabel } from '../../shared/i18n/index.js';
-import { info } from '../../shared/ui/index.js';
+import { error, info } from '../../shared/ui/index.js';
+import { sanitizeTerminalText } from '../../shared/utils/text.js';
+import { checkManagedProviders, ManagedProviderInstallError } from '../../infra/managed-providers/preflight.js';
+import { ManagedProviderInstallRequiredError } from '../../infra/managed-providers/loader.js';
+import { managedProviderFor, type ManagedProvider } from '../../infra/managed-providers/definitions.js';
+import { terminalProviderConfirmation } from '../tasks/execute/providerPreflight.js';
 import type { PostSummaryAction } from '../interactive/interactive-summary.js';
 import { selectRecentSession } from '../interactive/sessionSelector.js';
 import type { InteractiveModeResult } from '../interactive/interactive.js';
@@ -37,6 +43,8 @@ export interface TuiConversationRunOptions {
   readonly cwd: string;
   readonly lang: 'en' | 'ja';
   readonly conversation: TuiConversation;
+  readonly getProvider: () => string;
+  readonly interactiveSessionRecords?: InteractiveSessionRecords;
   /** Written into the transcript of the first mount only. */
   readonly initialEntries: readonly TranscriptEntry[];
   /** `summarize` turns the first input straight into an instruction. */
@@ -110,6 +118,7 @@ export async function runTuiConversation(
   options: TuiConversationRunOptions,
 ): Promise<InteractiveModeResult> {
   const exitedEarly = getLabel('tui.errors.exitedEarly', options.lang);
+  const checkedProviders = new Set<ManagedProvider>();
   let initialEntries: readonly TranscriptEntry[] = options.initialEntries;
   let autoSubmit = options.autoSubmit;
   let history: readonly string[] = [];
@@ -170,6 +179,18 @@ export async function runTuiConversation(
   };
 
   while (true) {
+    const provider = managedProviderFor(options.getProvider());
+    if (provider !== undefined && !checkedProviders.has(provider)) {
+      try {
+        await checkManagedProviders([provider], terminalProviderConfirmation());
+        checkedProviders.add(provider);
+      } catch (caught) {
+        if (!(caught instanceof ManagedProviderInstallRequiredError || caught instanceof ManagedProviderInstallError)) {
+          throw caught;
+        }
+        error(sanitizeTerminalText(caught.message));
+      }
+    }
     const settled = await mountInk<{
       readonly exit: Exclude<ConversationExit, { kind: 'failed' }>;
       readonly carried: ConversationCarryOver;
@@ -263,7 +284,7 @@ export async function runTuiConversation(
         break;
       }
       case 'resume_session': {
-        const selected = await selectRecentSession(options.cwd, options.lang);
+        const selected = await selectRecentSession(options.cwd, options.lang, options.getProvider(), options.interactiveSessionRecords);
         if (selected !== null) {
           const notice = await options.conversation.resumeSession(selected);
           initialEntries = notice === undefined

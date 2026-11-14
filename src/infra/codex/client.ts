@@ -29,17 +29,10 @@ import {
   AgentFailureDetail,
 } from '../../shared/types/agent-failure.js';
 import type { StreamToolUseEventData } from '../../shared/types/provider.js';
-import {
-  mapToCodexSandboxMode,
-  CodexCallOptions,
-} from './types.js';
+import type { CodexCallOptions } from './types.js';
+import { withToolActivityCall } from '../../shared/tool-activity/stream.js';
 import { buildCodexSessionConfig } from './session-config.js';
-import { prepareCodexMcpIsolation } from './mcp-isolation.js';
-import { delimiter } from 'node:path';
-import { resolveCodexSdkCli } from './cli-runtime.js';
-import { prepareCodexToolPermissionHook } from './tool-permission-hook.js';
-import { resolveCodexHookTrust } from './hook-trust.js';
-import { buildCodexToolPermissionHookConfig } from './tool-permission-hook-protocol.js';
+import { prepareCodexMcpExclusions, prepareCodexMcpIsolation } from './mcp-isolation.js';
 import { validateProviderImageAttachments } from '../providers/imageAttachments.js';
 import {
   type CodexEvent,
@@ -58,6 +51,10 @@ import {
   boundCodexFailureMessage,
   type CodexFailureMessageOptions,
 } from './failure-message.js';
+import {
+  createCodexRolloutObservation,
+  detectCodexCompaction,
+} from './compaction.js';
 
 export type { CodexCallOptions } from './types.js';
 
@@ -334,58 +331,16 @@ export class CodexClient {
       emitResult(options.onStream, false, response.error ?? response.content, options.sessionId, failure.category);
       return response;
     }
-    let hook: Awaited<ReturnType<typeof prepareCodexToolPermissionHook>> | undefined;
-    const usesHook = options.onToolPermissionDecision !== undefined && options.internalAgentIsolation !== 'strict-readonly' && !options.mcpOnlySideEffects;
-    try {
-      if (usesHook) {
-        hook = await prepareCodexToolPermissionHook(options.onToolPermissionDecision!, options.abortSignal);
-      }
-      const runtime = hook === undefined ? undefined : resolveCodexSdkCli(options.codexPathOverride, loaded.directory);
-      const response = await this.callWithSdk(agentType, prompt, {
-        ...options,
-        onStream: managedFailureStream(options.onStream, loaded.stale, 'codex'),
-      }, loaded.modules[0].Codex, hook === undefined || runtime === undefined ? undefined : { ...hook, ...runtime });
-      return managedFailureResponse(response, loaded.stale, 'codex');
-    } catch (error) {
-      if (!usesHook) throw error;
-      const rawFailure = options.abortSignal?.aborted ? classifyAbortSignalReason(options.abortSignal.reason)
-        : createProviderErrorFailure(getErrorMessage(error));
-      const failure = hook === undefined ? rawFailure : { ...rawFailure, reason: hook.redact(rawFailure.reason) };
-      const response = this.buildErrorResponse(agentType, options.sessionId, failure, options, 0);
-      emitResult(options.onStream, false, response.error ?? response.content, options.sessionId, failure.category);
-      return response;
-    } finally {
-      await hook?.dispose();
-    }
+    const response = await this.callWithSdk(agentType, prompt, {
+      ...options,
+      onStream: managedFailureStream(options.onStream, loaded.stale, 'codex'),
+    }, loaded.modules[0].Codex);
+    return managedFailureResponse(response, loaded.stale, 'codex');
   }
 
   private async callWithSdk(
     agentType: string, prompt: string, options: CodexCallOptions, Codex: typeof import('@openai/codex-sdk')['Codex'],
-    hook: (Awaited<ReturnType<typeof prepareCodexToolPermissionHook>> & ReturnType<typeof resolveCodexSdkCli>) | undefined,
   ): Promise<AgentResponse> {
-    const redact = (message: string) => hook === undefined ? message : hook.redact(message);
-    const redactFailure = (failure: AgentFailureDetail): AgentFailureDetail => hook === undefined
-      ? failure : { ...failure, reason: redact(failure.reason) };
-    const threadOptions = {
-      ...(options.model ? { model: options.model } : {}),
-      workingDirectory: options.cwd,
-      skipGitRepoCheck: true,
-      ...(options.permissionControl === 'codex'
-        ? {}
-        : {
-            sandboxMode: options.mcpOnlySideEffects ? 'read-only' as const : options.permissionMode
-              ? mapToCodexSandboxMode(options.permissionMode)
-              : 'workspace-write' as const,
-            ...(options.mcpOnlySideEffects
-              ? { networkAccessEnabled: false, webSearchMode: 'disabled' as const }
-              : options.networkAccess === undefined
-              ? {}
-              : { networkAccessEnabled: options.networkAccess }),
-          }),
-      // TAKT runs Codex non-interactively — there is no human to approve escalations.
-      // Force `never` so Codex cannot wait for an approval that no caller can provide.
-      approvalPolicy: 'never' as const,
-    };
     let threadId = options.sessionId;
 
     const fullPrompt = options.systemPrompt
@@ -422,35 +377,53 @@ export class CodexClient {
       return errorResponse;
     }
     const { config: codexConfig, env: codexEnvironment } = sessionConfig;
-    let hookConfigOverrides: string[] | undefined;
-    if (hook !== undefined) {
-      if (hook.pathDirs.length > 0) {
-        codexEnvironment.PATH = [...hook.pathDirs, ...(codexEnvironment.PATH === undefined ? [] : [codexEnvironment.PATH])].join(delimiter);
+    const threadOptions = {
+      ...(options.model ? { model: options.model } : {}),
+      workingDirectory: options.cwd,
+      skipGitRepoCheck: true,
+      ...sessionConfig.permissionThreadOptions,
+    };
+    let isolation: Awaited<ReturnType<typeof prepareCodexMcpIsolation>> | undefined;
+    let mcpExclusions: string[] = [];
+    let rolloutObservation: Awaited<ReturnType<typeof createCodexRolloutObservation>>;
+    try {
+      isolation = options.mcpOnlySideEffects
+        ? await prepareCodexMcpIsolation(options, codexConfig, codexEnvironment)
+        : undefined;
+      if (isolation === undefined) {
+        mcpExclusions = await prepareCodexMcpExclusions(options, codexConfig, codexEnvironment);
       }
-      const shellPolicy = codexConfig.shell_environment_policy as {
-        set?: Record<string, string>;
-      } | undefined;
-      codexConfig.shell_environment_policy = {
-        ...shellPolicy,
-        ...(codexEnvironment.PATH === undefined ? {} : {
-          set: { ...shellPolicy?.set, PATH: codexEnvironment.PATH },
-        }),
-      };
-      const trust = await resolveCodexHookTrust({
-        executablePath: hook.executablePath, cwd: options.cwd, env: codexEnvironment,
-        definition: hook.definition, abortSignal: options.abortSignal,
-      });
-      codexConfig.features = { ...(codexConfig.features as Record<string, boolean> | undefined), hooks: true };
-      codexConfig.hooks = buildCodexToolPermissionHookConfig(hook.definition);
-      hookConfigOverrides = [`hooks.state={${JSON.stringify(trust.key)}={trusted_hash=${JSON.stringify(trust.trustedHash)}}}`];
+      rolloutObservation = createCodexRolloutObservation(
+        codexEnvironment,
+        threadId,
+        new Date(),
+      );
+    } catch (error) {
+      const failure = createProviderErrorFailure(getErrorMessage(error));
+      const errorResponse = this.buildErrorResponse(agentType, threadId, failure, options, 0);
+      emitResult(
+        options.onStream,
+        false,
+        errorResponse.error ?? errorResponse.content,
+        threadId,
+        failure.category,
+      );
+      return errorResponse;
     }
 
-    const isolation = options.mcpOnlySideEffects
-      ? await prepareCodexMcpIsolation(options, codexConfig, codexEnvironment)
-      : undefined;
+    const compactedThreadIds = new Set<string | undefined>();
+    const signalCompaction = (sessionId: string | undefined): void => {
+      if (compactedThreadIds.has(sessionId)) return;
+      compactedThreadIds.add(sessionId);
+      options.onStream?.({
+        type: 'context_compacted',
+        data: { ...(sessionId !== undefined ? { sessionId } : {}) },
+      });
+    };
 
     while (true) {
       const attempt = standardRetryCount + timeoutRetryCount + refusalRetryCount + 1;
+      const onStream = withToolActivityCall(options.onStream);
       options.onActivity?.({ kind: 'attempt_started' });
       let currentThreadId = threadId;
       const codexClientOptions: CodexOptions = {
@@ -458,9 +431,8 @@ export class CodexClient {
         ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
         ...(isolation === undefined ? {
           env: codexEnvironment, config: codexConfig,
-          ...(hookConfigOverrides === undefined ? {} : { configOverrides: hookConfigOverrides }),
-          ...(hook !== undefined ? { codexPathOverride: hook.executablePath }
-            : options.codexPathOverride ? { codexPathOverride: options.codexPathOverride } : {}),
+          ...(mcpExclusions.length === 0 ? {} : { configOverrides: mcpExclusions }),
+          ...(options.codexPathOverride ? { codexPathOverride: options.codexPathOverride } : {}),
         } : isolation),
       };
       const codex = new Codex(codexClientOptions);
@@ -530,16 +502,19 @@ export class CodexClient {
         let sawTurnCompleted = false;
         let lastStreamErrorMessage: string | undefined;
 
-        for await (const rawEvent of events as AsyncGenerator<CodexEvent>) {
-          // SDK events are JSON; remove echoed hook credentials before diagnostics and stream consumers.
-          const event = hook === undefined ? rawEvent : JSON.parse(redact(JSON.stringify(rawEvent))) as CodexEvent;
+        for await (const event of events as AsyncGenerator<CodexEvent>) {
           resetIdleTimeout();
           diag.onFirstEvent(event.type);
           diag.onEvent(event.type);
 
           if (event.type === 'thread.started') {
             currentThreadId = typeof event.thread_id === 'string' ? event.thread_id : currentThreadId;
-            emitInit(options.onStream, options.model, currentThreadId);
+            emitInit(onStream, options.model, currentThreadId);
+            continue;
+          }
+
+          if (event.type === 'compacted') {
+            signalCompaction(currentThreadId);
             continue;
           }
 
@@ -567,7 +542,7 @@ export class CodexClient {
           if (event.type === 'item.started') {
             const item = event.item as CodexItem | undefined;
             if (item) {
-              emitCodexItemStart(item, options.onStream, state);
+              emitCodexItemStart(item, onStream, state);
             }
             continue;
           }
@@ -589,7 +564,7 @@ export class CodexClient {
                   }
                 }
               }
-              emitCodexItemUpdate(item, options.onStream, state);
+              emitCodexItemUpdate(item, onStream, state);
             }
             continue;
           }
@@ -617,7 +592,7 @@ export class CodexClient {
                   content += text;
                 }
               }
-              emitCodexItemCompleted(item, options.onStream, state);
+              emitCodexItemCompleted(item, onStream, state);
             }
             continue;
           }
@@ -641,14 +616,14 @@ export class CodexClient {
         diag.onCompleted(success ? 'normal' : 'error', boundedStreamFailureMessage);
 
         if (!success) {
-          const failure = redactFailure(this.resolveFailureDetail(
+          const failure = this.resolveFailureDetail(
             failureMessage || 'Codex execution failed',
             streamAbortController.signal,
             options.abortSignal,
             abortCause,
             timeoutMessage,
             threadId,
-          ));
+          );
           const rateLimitClass = classifyRateLimitError(failureMessage);
           if (
             failure.category === AGENT_FAILURE_CATEGORIES.PROVIDER_ERROR
@@ -663,7 +638,7 @@ export class CodexClient {
               options,
               totalRetryCount(),
             );
-            emitResult(options.onStream, false, rateLimitedResponse.error ?? rateLimitedResponse.content, currentThreadId);
+            emitResult(onStream, false, rateLimitedResponse.error ?? rateLimitedResponse.content, currentThreadId);
             return rateLimitedResponse;
           }
 
@@ -692,7 +667,7 @@ export class CodexClient {
             totalRetryCount(),
           );
           emitResult(
-            options.onStream,
+            onStream,
             false,
             errorResponse.error ?? errorResponse.content,
             currentThreadId,
@@ -710,7 +685,7 @@ export class CodexClient {
             totalRetryCount(),
             'error_text',
           );
-          emitResult(options.onStream, false, rateLimitedResponse.error ?? rateLimitedResponse.content, currentThreadId);
+          emitResult(onStream, false, rateLimitedResponse.error ?? rateLimitedResponse.content, currentThreadId);
           return {
             ...rateLimitedResponse,
             providerUsage: providerUsage ?? {
@@ -751,7 +726,7 @@ export class CodexClient {
             totalRetryCount(),
           );
           emitResult(
-            options.onStream,
+            onStream,
             false,
             errorResponse.error ?? errorResponse.content,
             currentThreadId,
@@ -760,7 +735,11 @@ export class CodexClient {
           return errorResponse;
         }
 
-        emitResult(options.onStream, true, trimmed, currentThreadId);
+        if (!compactedThreadIds.has(currentThreadId)
+          && await detectCodexCompaction(rolloutObservation, currentThreadId)) {
+          signalCompaction(currentThreadId);
+        }
+        emitResult(onStream, true, trimmed, currentThreadId);
 
         const response: AgentResponse = {
           persona: agentType,
@@ -777,15 +756,15 @@ export class CodexClient {
         };
         return response;
       } catch (error) {
-        const rawErrorMessage = redact(getErrorMessage(error));
-        let failure = redactFailure(this.resolveFailureDetail(
+        const rawErrorMessage = getErrorMessage(error);
+        let failure = this.resolveFailureDetail(
           rawErrorMessage,
           streamAbortController.signal,
           options.abortSignal,
           abortCause,
           timeoutMessage,
           threadId,
-        ));
+        );
         const rateLimitClass = classifyRateLimitError(rawErrorMessage);
         if (
           failure.category === AGENT_FAILURE_CATEGORIES.PROVIDER_ERROR
@@ -800,7 +779,7 @@ export class CodexClient {
             options,
             totalRetryCount(),
           );
-          emitResult(options.onStream, false, rateLimitedResponse.error ?? rateLimitedResponse.content, currentThreadId);
+          emitResult(onStream, false, rateLimitedResponse.error ?? rateLimitedResponse.content, currentThreadId);
           return rateLimitedResponse;
         }
 
@@ -832,8 +811,8 @@ export class CodexClient {
             await waitForRateLimitRetry(retryState.retryAttempt, options.abortSignal);
             continue;
           } catch (retryError) {
-            failure = redactFailure(this.resolveFailureDetail(redact(getErrorMessage(retryError)), streamAbortController.signal,
-              options.abortSignal, abortCause, timeoutMessage, threadId));
+            failure = this.resolveFailureDetail(getErrorMessage(retryError), streamAbortController.signal,
+              options.abortSignal, abortCause, timeoutMessage, threadId);
           }
         }
 
@@ -846,7 +825,7 @@ export class CodexClient {
           totalRetryCount(),
         );
         emitResult(
-          options.onStream,
+          onStream,
           false,
           errorResponse.error ?? errorResponse.content,
           currentThreadId,

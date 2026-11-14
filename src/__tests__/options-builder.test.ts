@@ -1,357 +1,12 @@
-import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
-import type { HookCallback, HookJSONOutput, Options, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { buildSdkOptions, TOOL_PERMISSION_DECISION_TIMEOUT_MS } from '../infra/claude/options-builder.js';
-import * as readonlyArtifactAccess from '../infra/claude/readonly-artifact-access.js';
-import type {
-  ClaudeSpawnOptions,
-  ToolPermissionDecision,
-  ToolPermissionDecisionHandler,
-  ToolPermissionDecisionRequest,
-} from '../infra/claude/types.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OptionsBuilder } from '../core/workflow/engine/OptionsBuilder.js';
 import { createInitialState } from '../core/workflow/engine/state-manager.js';
 import * as capabilityModule from '../infra/providers/provider-capabilities.js';
 import type { NormalAgentWorkflowStep, WorkflowResumePointEntry, WorkflowStep } from '../core/models/types.js';
 import type { WorkflowEngineOptions } from '../core/workflow/types.js';
 import { DeepSeekHarnessProvider } from '../infra/providers/deepseek-harness.js';
-
-function createPreToolUseInput(
-  toolName: string,
-  toolInput: unknown,
-): PreToolUseHookInput {
-  return {
-    hook_event_name: 'PreToolUse',
-    session_id: 'permission-test-session',
-    transcript_path: '/runtime/transcript.jsonl',
-    cwd: '/runtime/tool-cwd',
-    tool_name: toolName,
-    tool_input: toolInput,
-    tool_use_id: 'permission-test-tool-use',
-  };
-}
-
-function getToolDecisionHook(options: Options): HookCallback {
-  const registrations = options.hooks?.PreToolUse?.filter(({ matcher }) => matcher === undefined);
-  expect(registrations).toHaveLength(1);
-  expect(registrations![0]!.hooks).toHaveLength(1);
-  return registrations![0]!.hooks[0]!;
-}
-
-async function invokeMatchingPreToolUseHooks(
-  options: Options,
-  input: PreToolUseHookInput,
-): Promise<HookJSONOutput[]> {
-  const registrations = options.hooks?.PreToolUse;
-  expect(registrations).toBeDefined();
-  return Promise.all(registrations!
-    .filter(({ matcher }) => matcher === undefined || matcher === input.tool_name)
-    .flatMap(({ hooks }) => hooks.map((hook) => hook(
-      input,
-      input.tool_use_id,
-      { signal: new AbortController().signal },
-    ))));
-}
-
-function expectReasonedToolDenial(output: HookJSONOutput): void {
-  expect(output).toMatchObject({
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'deny',
-      permissionDecisionReason: expect.stringMatching(/\S/u),
-    },
-  });
-}
-
-describe('SdkOptionsBuilder tool permission decision hook', () => {
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.restoreAllMocks();
-  });
-
-  it('exports the specified request, decision, handler and optional spawn option types', () => {
-    expectTypeOf<ToolPermissionDecisionRequest>().toEqualTypeOf<{
-      readonly toolName: string;
-      readonly toolInput: unknown;
-      readonly cwd: string;
-      readonly abortSignal?: AbortSignal;
-    }>();
-    expectTypeOf<ToolPermissionDecision>().toEqualTypeOf<
-      | { readonly decision: 'allow' }
-      | { readonly decision: 'deny'; readonly reason: string }
-    >();
-    expectTypeOf<ToolPermissionDecisionHandler>().toEqualTypeOf<
-      (request: ToolPermissionDecisionRequest) => Promise<ToolPermissionDecision>
-    >();
-    expectTypeOf<Pick<ClaudeSpawnOptions, 'onToolPermissionDecision'>>().toEqualTypeOf<{
-      onToolPermissionDecision?: ToolPermissionDecisionHandler;
-    }>();
-  });
-
-  it('does not register a decision hook when no handler is supplied', () => {
-    const options = buildSdkOptions({ cwd: '/configured/cwd' });
-
-    expect(options.hooks?.PreToolUse?.filter(({ matcher }) => matcher === undefined)).toHaveLength(0);
-  });
-
-  it.each([
-    { toolName: 'Read', toolInput: { file_path: '/runtime/file.txt' } },
-    { toolName: 'UnlistedTool', toolInput: null },
-    { toolName: 'mcp__external__custom_action', toolInput: ['opaque', { value: 1 }] },
-  ])('registers one unfiltered hook and forwards $toolName in full permission mode', async ({ toolName, toolInput }) => {
-    const handler = vi.fn<ToolPermissionDecisionHandler>().mockResolvedValue({ decision: 'allow' });
-    const options = buildSdkOptions({
-      cwd: '/configured/cwd',
-      permissionMode: 'full',
-      allowedTools: ['Read'],
-      onToolPermissionDecision: handler,
-    });
-    const input = createPreToolUseInput(toolName, toolInput);
-
-    await getToolDecisionHook(options)(input, input.tool_use_id, { signal: new AbortController().signal });
-
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith(expect.objectContaining({
-      toolName,
-      toolInput,
-      cwd: input.cwd,
-    }));
-  });
-
-  it('converts a top-level allow decision to SDK permission output', async () => {
-    const handler = vi.fn<ToolPermissionDecisionHandler>().mockResolvedValue({ decision: 'allow' });
-    const hook = getToolDecisionHook(buildSdkOptions({ cwd: '/project', onToolPermissionDecision: handler }));
-
-    const output = await hook(createPreToolUseInput('CustomTool', {}), undefined, { signal: new AbortController().signal });
-
-    expect(output).toMatchObject({
-      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
-    });
-    expect(handler).toHaveBeenCalledTimes(1);
-  });
-
-  it.each(['判断役による拒否', ''])('preserves a deny decision and its reason: %j', async (reason) => {
-    const handler = vi.fn<ToolPermissionDecisionHandler>().mockResolvedValue({ decision: 'deny', reason });
-    const hook = getToolDecisionHook(buildSdkOptions({ cwd: '/project', onToolPermissionDecision: handler }));
-
-    const output = await hook(createPreToolUseInput('CustomTool', {}), undefined, { signal: new AbortController().signal });
-
-    expect(output).toMatchObject({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason,
-      },
-    });
-    expect(handler).toHaveBeenCalledTimes(1);
-  });
-
-  it.each([
-    { label: 'nested allow', value: { result: { decision: 'allow' } } },
-    { label: 'nested allow JSON string', value: '{"result":{"decision":"allow"}}' },
-    { label: 'top-level allow JSON string', value: '{"decision":"allow"}' },
-    { label: 'null', value: null },
-    { label: 'undefined', value: undefined },
-    { label: 'array', value: [{ decision: 'allow' }] },
-    { label: 'bare string', value: 'allow' },
-    { label: 'unknown decision', value: { decision: 'ask' } },
-    { label: 'missing deny reason', value: { decision: 'deny' } },
-    { label: 'non-string deny reason', value: { decision: 'deny', reason: 42 } },
-  ])('denies an invalid result without retrying: $label', async ({ value }) => {
-    // 外部ハンドラーの実行時の契約違反を再現する。
-    const handler = vi.fn<ToolPermissionDecisionHandler>().mockResolvedValue(value as ToolPermissionDecision);
-    const hook = getToolDecisionHook(buildSdkOptions({ cwd: '/project', onToolPermissionDecision: handler }));
-
-    const output = await hook(createPreToolUseInput('CustomTool', {}), undefined, { signal: new AbortController().signal });
-
-    expectReasonedToolDenial(output);
-    expect(handler).toHaveBeenCalledTimes(1);
-  });
-
-  it.each(['throw', 'reject'] as const)('denies a handler %s without retrying', async (failure) => {
-    const handler = vi.fn<ToolPermissionDecisionHandler>().mockImplementation(() => {
-      const error = new Error('decision handler failed');
-      if (failure === 'throw') throw error;
-      return Promise.reject(error);
-    });
-    const hook = getToolDecisionHook(buildSdkOptions({ cwd: '/project', onToolPermissionDecision: handler }));
-
-    const output = await hook(createPreToolUseInput('CustomTool', {}), undefined, { signal: new AbortController().signal });
-
-    expectReasonedToolDenial(output);
-    expect(handler).toHaveBeenCalledTimes(1);
-  });
-
-  it('exports a 60000 millisecond decision timeout', () => {
-    expect(TOOL_PERMISSION_DECISION_TIMEOUT_MS).toBe(60_000);
-  });
-
-  it('denies a pending decision at 60000 milliseconds without retrying', async () => {
-    vi.useFakeTimers();
-    const handler = vi.fn<ToolPermissionDecisionHandler>().mockImplementation(() => new Promise(() => {}));
-    const hook = getToolDecisionHook(buildSdkOptions({ cwd: '/project', onToolPermissionDecision: handler }));
-    let settled = false;
-
-    const pending = hook(createPreToolUseInput('CustomTool', {}), undefined, { signal: new AbortController().signal });
-    void pending.then(() => { settled = true; });
-    await vi.advanceTimersByTimeAsync(59_999);
-    expect(settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-
-    expect(settled).toBe(true);
-    expectReasonedToolDenial(await pending);
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it.each(['allow', 'deny', 'throw', 'invalid'] as const)('clears the wait timer after a completed %s result', async (outcome) => {
-    vi.useFakeTimers();
-    const handler = vi.fn<ToolPermissionDecisionHandler>().mockImplementation(async () => {
-      if (outcome === 'throw') throw new Error('decision failed');
-      if (outcome === 'invalid') return null as unknown as ToolPermissionDecision;
-      return outcome === 'allow' ? { decision: 'allow' } : { decision: 'deny', reason: 'denied' };
-    });
-    const hook = getToolDecisionHook(buildSdkOptions({ cwd: '/project', onToolPermissionDecision: handler }));
-
-    const output = await hook(createPreToolUseInput('CustomTool', {}), undefined, { signal: new AbortController().signal });
-
-    if (outcome === 'allow') {
-      expect(output).toMatchObject({ hookSpecificOutput: { permissionDecision: 'allow' } });
-    } else {
-      expectReasonedToolDenial(output);
-    }
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it.each([
-    { source: 'parent', withParent: true },
-    { source: 'SDK', withParent: true },
-    { source: 'SDK', withParent: false },
-  ])('propagates $source cancellation to the running handler (parent supplied: $withParent)', async ({ source, withParent }) => {
-    const parent = new AbortController();
-    const sdk = new AbortController();
-    let complete!: (decision: ToolPermissionDecision) => void;
-    const decision = new Promise<ToolPermissionDecision>((resolve) => { complete = resolve; });
-    let markStarted!: (request: ToolPermissionDecisionRequest) => void;
-    const started = new Promise<ToolPermissionDecisionRequest>((resolve) => { markStarted = resolve; });
-    const handler = vi.fn<ToolPermissionDecisionHandler>().mockImplementation((request) => {
-      markStarted(request);
-      return decision;
-    });
-    const hook = getToolDecisionHook(buildSdkOptions({
-      cwd: '/project',
-      ...(withParent ? { abortSignal: parent.signal } : {}),
-      onToolPermissionDecision: handler,
-    }));
-
-    const pending = hook(createPreToolUseInput('CustomTool', {}), undefined, { signal: sdk.signal });
-    try {
-      const { abortSignal } = await started;
-      expect(abortSignal).toBeInstanceOf(AbortSignal);
-      expect(abortSignal!.aborted).toBe(false);
-      const onAbort = vi.fn();
-      abortSignal!.addEventListener('abort', onAbort, { once: true });
-
-      (source === 'parent' ? parent : sdk).abort();
-
-      expect(abortSignal!.aborted).toBe(true);
-      expect(onAbort).toHaveBeenCalledTimes(1);
-      expect(handler).toHaveBeenCalledTimes(1);
-    } finally {
-      complete({ decision: 'allow' });
-      await pending;
-    }
-  });
-
-  it.each(['parent', 'SDK'] as const)('passes an already aborted %s signal to the handler', async (source) => {
-    const parent = new AbortController();
-    const sdk = new AbortController();
-    (source === 'parent' ? parent : sdk).abort();
-    const handler = vi.fn<ToolPermissionDecisionHandler>().mockResolvedValue({ decision: 'allow' });
-    const hook = getToolDecisionHook(buildSdkOptions({
-      cwd: '/project', abortSignal: parent.signal, onToolPermissionDecision: handler,
-    }));
-
-    await hook(createPreToolUseInput('CustomTool', {}), undefined, { signal: sdk.signal });
-
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler.mock.calls[0]![0].abortSignal?.aborted).toBe(true);
-  });
-
-  describe.each(['strictToolAllowlist', 'mcpOnlySideEffects'] as const)('%s coexistence', (restriction) => {
-    it('runs both AskUserQuestion and the decision handler alongside the strict denial', async () => {
-      const answers = { 'Which option?': 'Option A' };
-      const onAskUserQuestion = vi.fn().mockResolvedValue(answers);
-      const onToolPermissionDecision = vi.fn<ToolPermissionDecisionHandler>().mockResolvedValue({ decision: 'allow' });
-      const options = buildSdkOptions({
-        cwd: '/project', permissionMode: 'readonly', [restriction]: ['Read'],
-        onAskUserQuestion, onToolPermissionDecision,
-      });
-      const toolInput = { questions: [{ question: 'Which option?' }] };
-
-      const outputs = await invokeMatchingPreToolUseHooks(options, createPreToolUseInput('AskUserQuestion', toolInput));
-
-      expect(onAskUserQuestion).toHaveBeenCalledExactlyOnceWith(toolInput);
-      expect(onToolPermissionDecision).toHaveBeenCalledTimes(1);
-      expect(outputs).toEqual(expect.arrayContaining([
-        expect.objectContaining({ hookSpecificOutput: expect.objectContaining({ additionalContext: JSON.stringify(answers) }) }),
-        expect.objectContaining({ hookSpecificOutput: expect.objectContaining({ permissionDecision: 'allow' }) }),
-        expect.objectContaining({ hookSpecificOutput: expect.objectContaining({ permissionDecision: 'deny' }) }),
-      ]));
-    });
-
-    it('keeps the strict denial when the decision handler allows an unlisted tool', async () => {
-      const handler = vi.fn<ToolPermissionDecisionHandler>().mockResolvedValue({ decision: 'allow' });
-      const options = buildSdkOptions({
-        cwd: '/project', permissionMode: 'readonly', [restriction]: ['Read'], onToolPermissionDecision: handler,
-      });
-
-      const outputs = await invokeMatchingPreToolUseHooks(options, createPreToolUseInput('Bash', { command: 'pwd' }));
-
-      expect(handler).toHaveBeenCalledTimes(1);
-      expect(outputs).toEqual(expect.arrayContaining([
-        expect.objectContaining({ hookSpecificOutput: expect.objectContaining({ permissionDecision: 'allow' }) }),
-        expect.objectContaining({ hookSpecificOutput: expect.objectContaining({ permissionDecision: 'deny' }) }),
-      ]));
-    });
-
-    it('keeps the decision handler denial when the strict allowlist permits the tool', async () => {
-      const reason = '外部の判断役が拒否';
-      const handler = vi.fn<ToolPermissionDecisionHandler>().mockResolvedValue({ decision: 'deny', reason });
-      const toolName = 'mcp__external__inspect';
-      const options = buildSdkOptions({
-        cwd: '/project', permissionMode: 'readonly', [restriction]: [toolName], onToolPermissionDecision: handler,
-      });
-
-      const outputs = await invokeMatchingPreToolUseHooks(options, createPreToolUseInput(toolName, {}));
-
-      expect(handler).toHaveBeenCalledTimes(1);
-      expect(outputs).toEqual(expect.arrayContaining([
-        expect.objectContaining({ hookSpecificOutput: expect.objectContaining({ permissionDecision: 'allow' }) }),
-        expect.objectContaining({ hookSpecificOutput: expect.objectContaining({ permissionDecision: 'deny', permissionDecisionReason: reason }) }),
-      ]));
-    });
-
-    it('retains the readonly Read boundary alongside both allowing hooks', async () => {
-      const paths = ['/project/verification.txt'];
-      vi.spyOn(readonlyArtifactAccess, 'resolveReadonlyArtifactReadPaths').mockReturnValue(paths);
-      const isAllowed = vi.spyOn(readonlyArtifactAccess, 'isReadonlyArtifactReadAllowed').mockReturnValue(false);
-      const handler = vi.fn<ToolPermissionDecisionHandler>().mockResolvedValue({ decision: 'allow' });
-      const options = buildSdkOptions({
-        cwd: '/project', permissionMode: 'readonly', internalAgentIsolation: 'strict-readonly',
-        allowReadonlyFileRead: true, readonlyFileReadPaths: paths, allowedTools: ['Read'],
-        [restriction]: ['Read'], onToolPermissionDecision: handler,
-      });
-
-      const outputs = await invokeMatchingPreToolUseHooks(options, createPreToolUseInput('Read', { file_path: '/project/secrets.txt' }));
-
-      expect(isAllowed).toHaveBeenCalledExactlyOnceWith('/project/secrets.txt', '/project', paths);
-      expect(handler).toHaveBeenCalledTimes(1);
-      expect(outputs.filter((output) => 'hookSpecificOutput' in output && output.hookSpecificOutput?.hookEventName === 'PreToolUse'
-        && output.hookSpecificOutput.permissionDecision === 'allow')).toHaveLength(2);
-      expect(outputs).toEqual(expect.arrayContaining([
-        expect.objectContaining({ hookSpecificOutput: expect.objectContaining({ permissionDecision: 'deny' }) }),
-      ]));
-    });
-  });
-});
+import { buildOpenCodePromptTools } from '../infra/opencode/types.js';
+import { resolvePiActiveTools } from '../infra/providers/pi-tool-policy.js';
 
 function createStep(overrides: Partial<NormalAgentWorkflowStep> = {}): NormalAgentWorkflowStep {
   const hasEngineProviderFields = overrides.provider !== undefined
@@ -379,6 +34,7 @@ interface PhaseContextSources {
   readonly projectCwd?: string;
   readonly currentWorkflowStack?: readonly WorkflowResumePointEntry[];
   readonly reportsRootDir?: string;
+  readonly openCodeExternalDirectories?: readonly string[];
 }
 
 function createProcessSafetyByStep(parentRunPid: number): WorkflowEngineOptions['phase1ProcessSafetyByStep'] {
@@ -426,6 +82,8 @@ function createBuilder(
     reportsRootDir === undefined
       ? undefined
       : () => reportsRootDir,
+    undefined,
+    phaseContextSources.openCodeExternalDirectories,
   );
 }
 
@@ -448,6 +106,21 @@ describe('OptionsBuilder.buildBaseOptions', () => {
         codex: { defaultPermissionMode: 'full' },
       },
     });
+  });
+
+  it('carries TAKT external context directories into OpenCode workflow options', () => {
+    const contextDirectory = '/state/.takt/runs/run-a/context';
+    const builder = createBuilder(
+      createStep({ provider: 'opencode', model: 'opencode/model' }),
+      { provider: 'opencode', model: 'opencode/model' },
+      undefined,
+      { openCodeExternalDirectories: [contextDirectory] },
+    );
+
+    const step = createStep({ provider: 'opencode', model: 'opencode/model' });
+    expect(builder.buildBaseOptions(step).openCodeExternalDirectories).toEqual([contextDirectory]);
+    expect(builder.buildNewSessionReportOptions(step, { maxTurns: 1 }).openCodeExternalDirectories)
+      .toEqual([contextDirectory]);
   });
 
   it('passes runtime defaults permission mode to the actual provider call', () => {
@@ -1257,7 +930,7 @@ describe('OptionsBuilder.buildResumeOptions', () => {
     vi.clearAllMocks();
   });
 
-  it('should enforce readonly permission and empty allowedTools for report/status phases', () => {
+  it('should enforce readonly permission and read tools for report phases', () => {
     // Given
     const step = createStep({ requiredPermissionMode: 'full' });
     const builder = createBuilder(step, { bypassPermissions: true });
@@ -1269,26 +942,87 @@ describe('OptionsBuilder.buildResumeOptions', () => {
     expect(options.permissionMode).toBe('readonly');
     expect(options.permissionResolution).toBeUndefined();
     expect(options.bypassPermissions).toBeUndefined();
-    expect(options.allowedTools).toEqual([]);
+    expect(options.allowedTools).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(options, 'maxTurns')).toBe(true);
     expect(options.maxTurns).toBe(3);
     expect(options.sessionId).toBe('session-123');
   });
 
-  it('retains tool-free or explicit constraints and rejects every DeepSeek report route before SDK startup', async () => {
+  it.each(['claude', 'claude-sdk', 'claude-headless', 'claude-terminal', 'codex', 'opencode', 'pi', 'mock',
+    'copilot', 'kiro', 'cursor', 'devin'] as const)(
+    'allows report tools on all three Phase 2 routes (%s)', (provider) => {
+      const readonlyStep = createStep({ provider, model: 'test-model', requiredPermissionMode: 'readonly',
+        edit: false });
+      const builder = createBuilder(readonlyStep, { bypassPermissions: true });
+      const phase1 = builder.buildAgentOptions(readonlyStep);
+      const expectedTools = ['codex', 'copilot', 'kiro', 'cursor', 'devin'].includes(provider) ? undefined
+        : provider === 'pi' ? ['read', 'grep', 'find', 'ls', 'codemode']
+          : provider === 'opencode' ? ['read', 'list', 'glob', 'grep']
+            : provider === 'mock' ? ['Read', 'Glob', 'Grep']
+              : ['Read', 'Glob', 'Grep', 'Bash'];
+      const primary = createStep({ provider: 'opencode', model: 'primary' });
+      const fallbackBuilder = createBuilder(primary, { reportFallbackProvider: { provider, model: 'test-model' } });
+      const routes = [
+        builder.buildResumeOptions(readonlyStep, 'session', { maxTurns: 3 }),
+        builder.buildNewSessionReportOptions(readonlyStep, { maxTurns: 3 }),
+        ...(provider === 'opencode' ? [] : [fallbackBuilder.buildFallbackReportOptions(primary,
+          { cwd: '/project', resolvedProvider: 'opencode' }, { maxTurns: 3 })!]),
+      ];
+      for (const options of routes) {
+        expect(options.allowedTools).toEqual(expectedTools);
+        expect(options.permissionMode).toBe('readonly');
+        expect(options.permissionResolution).toBeUndefined();
+        expect(options.bypassPermissions).toBeUndefined();
+        expect(options.executionPhase).toBe(2);
+        expect(options.outputSchema).toBeUndefined();
+      }
+      if (provider === 'pi') expect(phase1.allowedTools).toEqual(expectedTools);
+    },
+  );
+
+  it.each([undefined, ['Read', 'Glob', 'Grep']])(
+    'preserves OpenCode readonly file tools while excluding Skill from reports (%j)', (phase1AllowedTools) => {
+      const step = createStep({ provider: 'opencode', model: 'opencode/test-model' });
+      const builder = createBuilder(step);
+      const phase1Tools = buildOpenCodePromptTools('readonly', undefined, phase1AllowedTools);
+      const enabledNames = (tools: Record<string, boolean>): string[] => Object.entries(tools)
+        .filter(([, enabled]) => enabled).map(([name]) => name);
+      const phase1Names = enabledNames(phase1Tools);
+      expect(phase1Names).toContain('skill');
+
+      for (const options of [
+        builder.buildResumeOptions(step, 'session', { maxTurns: 3 }),
+        builder.buildNewSessionReportOptions(step, { maxTurns: 3 }),
+      ]) {
+        expect(new Set(options.allowedTools)).toEqual(new Set(phase1Names.filter((name) => name !== 'skill')));
+      }
+    },
+  );
+
+  it('allows the actual Pi readonly tool names after workflow aliases are normalized', () => {
+    const step = createStep({ provider: 'pi', model: 'test-model' });
+    const options = createBuilder(step).buildResumeOptions(step, 'session', { maxTurns: 3 });
+    const tools = ['read', 'grep', 'find', 'ls', 'codemode', 'bash', 'write', 'edit']
+      .map((name) => ({ name, source: 'builtin' }));
+    const phase1Names = resolvePiActiveTools('readonly', ['Read', 'Grep', 'Glob', 'LS', 'CodeMode'], tools);
+
+    expect(new Set(options.allowedTools)).toEqual(new Set(phase1Names));
+    expect(resolvePiActiveTools(options.permissionMode, options.allowedTools, tools)).toEqual(phase1Names);
+  });
+
+  it('rejects every DeepSeek report route before SDK startup when tool constraints cannot be enforced', async () => {
     const step = createStep({ provider: 'deepseek-harness', model: 'deepseek-v4-flash' });
     const builder = createBuilder(step);
 
     const resumeOptions = builder.buildResumeOptions(step, 'session-123', { maxTurns: 3 });
     const newSessionOptions = builder.buildNewSessionReportOptions(step, {
-      allowedTools: ['Read'],
       maxTurns: 3,
     });
 
     expect(resumeOptions.permissionMode).toBeUndefined();
     expect(resumeOptions.allowedTools).toEqual([]);
     expect(newSessionOptions.permissionMode).toBeUndefined();
-    expect(newSessionOptions.allowedTools).toEqual(['Read']);
+    expect(newSessionOptions.allowedTools).toEqual([]);
 
     const fallbackBuilder = createBuilder(
       createStep({ provider: 'opencode', model: 'opencode/report-model' }),
@@ -1297,17 +1031,15 @@ describe('OptionsBuilder.buildResumeOptions', () => {
     const fallbackOptions = fallbackBuilder.buildFallbackReportOptions(
       createStep({ provider: 'opencode', model: 'opencode/report-model' }),
       { cwd: '/project', resolvedProvider: 'opencode' },
-      { allowedTools: [], maxTurns: 3 },
+      { maxTurns: 3 },
     );
 
     expect(fallbackOptions).toBeDefined();
     expect(fallbackOptions?.permissionMode).toBeUndefined();
     expect(fallbackOptions?.allowedTools).toEqual([]);
 
-    const emptyOptions = builder.buildNewSessionReportOptions(step, { allowedTools: [], maxTurns: 3 });
-    const omittedOptions = builder.buildNewSessionReportOptions(step, { maxTurns: 3 });
     const provider = new DeepSeekHarnessProvider().setup({ name: 'report' });
-    for (const options of [resumeOptions, newSessionOptions, emptyOptions, omittedOptions, fallbackOptions!]) {
+    for (const options of [resumeOptions, newSessionOptions, fallbackOptions!]) {
       const response = await provider.call('Generate a tool-free report.', options);
       expect(response.status).toBe('error');
       expect(response.content).toContain('cannot honor allowedTools');
@@ -1323,7 +1055,6 @@ describe('OptionsBuilder.buildResumeOptions', () => {
     const builder = createBuilder(step);
 
     const options = builder.buildNewSessionReportOptions(step, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
@@ -1370,11 +1101,9 @@ describe('OptionsBuilder.buildResumeOptions', () => {
     // When
     const resumeOptions = builder.buildResumeOptions(step, 'session-123', { maxTurns: 3 });
     const newSessionOptions = builder.buildNewSessionReportOptions(step, {
-      allowedTools: [],
       maxTurns: 3,
     });
     const fallbackOptions = builder.buildFallbackReportOptions(step, newSessionOptions, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
@@ -1398,11 +1127,9 @@ describe('OptionsBuilder.buildResumeOptions', () => {
     }, recordActivity);
     const resumeOptions = builder.buildResumeOptions(step, 'session-123', { maxTurns: 3 });
     const newSessionOptions = builder.buildNewSessionReportOptions(step, {
-      allowedTools: [],
       maxTurns: 3,
     });
     const fallbackOptions = builder.buildFallbackReportOptions(step, newSessionOptions, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
@@ -1464,7 +1191,6 @@ describe('OptionsBuilder.buildNewSessionReportOptions', () => {
     });
 
     const options = builder.buildNewSessionReportOptions(step, {
-      allowedTools: ['Write'],
       maxTurns: 3,
     });
 
@@ -1481,7 +1207,6 @@ describe('OptionsBuilder.buildNewSessionReportOptions', () => {
     });
 
     const options = builder.buildNewSessionReportOptions(step, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
@@ -1495,12 +1220,11 @@ describe('OptionsBuilder.buildNewSessionReportOptions', () => {
     const builder = createBuilder(step);
 
     const options = builder.buildNewSessionReportOptions(step, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
     expect(options.resolvedProvider).toBe('claude-terminal');
-    expect(options.allowedTools).toEqual([]);
+    expect(options.allowedTools).toEqual(['Read', 'Glob', 'Grep', 'Bash']);
     expect(Object.prototype.hasOwnProperty.call(options, 'maxTurns')).toBe(false);
     expect(options.maxTurns).toBeUndefined();
   });
@@ -1510,12 +1234,11 @@ describe('OptionsBuilder.buildNewSessionReportOptions', () => {
     const builder = createBuilder(step);
 
     const options = builder.buildNewSessionReportOptions(step, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
     expect(options.resolvedProvider).toBe('opencode');
-    expect(options.allowedTools).toEqual([]);
+    expect(options.allowedTools).toEqual(['read', 'list', 'glob', 'grep']);
     expect(Object.prototype.hasOwnProperty.call(options, 'maxTurns')).toBe(false);
     expect(options.maxTurns).toBeUndefined();
   });
@@ -1547,7 +1270,6 @@ describe('OptionsBuilder.buildFallbackReportOptions', () => {
       resolvedProvider: 'opencode',
       resolvedModel: 'opencode/qwen3-coder-next',
     }, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
@@ -1562,7 +1284,7 @@ describe('OptionsBuilder.buildFallbackReportOptions', () => {
     expect(options.permissionMode).toBe('readonly');
     expect(options.permissionResolution).toBeUndefined();
     expect(options.bypassPermissions).toBeUndefined();
-    expect(options.allowedTools).toEqual([]);
+    expect(options.allowedTools).toEqual(['Read', 'Glob', 'Grep']);
     expect(options.maxTurns).toBe(3);
     expect('providerSource' in options).toBe(false);
     expect('modelSource' in options).toBe(false);
@@ -1579,7 +1301,6 @@ describe('OptionsBuilder.buildFallbackReportOptions', () => {
       resolvedProvider: 'opencode',
       resolvedModel: 'opencode/qwen3-coder-next',
     }, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
@@ -1602,7 +1323,6 @@ describe('OptionsBuilder.buildFallbackReportOptions', () => {
       cwd: '/project',
       resolvedProvider: 'codex',
     }, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
@@ -1626,7 +1346,6 @@ describe('OptionsBuilder.buildFallbackReportOptions', () => {
       resolvedProvider: 'opencode',
       resolvedModel: 'opencode/qwen3-coder-next',
     }, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
@@ -1667,7 +1386,6 @@ describe('OptionsBuilder.buildFallbackReportOptions', () => {
       resolvedProvider: 'opencode',
       resolvedModel: 'opencode/qwen3-coder-next',
     }, {
-      allowedTools: [],
       maxTurns: 3,
     });
 
@@ -1696,7 +1414,7 @@ describe('OptionsBuilder.buildFallbackReportOptions', () => {
       resolvedProvider: 'codex',
       resolvedModel: 'gpt-5.1-mini',
       permissionMode: 'readonly',
-      allowedTools: [],
+      allowedTools: undefined,
       maxTurns: 3,
       sessionId: undefined,
     });
@@ -2175,5 +1893,41 @@ describe('OptionsBuilder.buildAgentOptions', () => {
       },
     });
     expect(options.allowedTools).toEqual(['Read', 'Edit', 'Bash']);
+  });
+
+  it('keeps claude permissions for Claude team leader parts when part_allowed_tools is given', () => {
+    const step = createStep({
+      providerOptions: {
+        claude: {
+          allowedTools: ['Read', 'Edit', 'Bash'],
+          permissions: { deny: ['Read(./.env)'] },
+        },
+      },
+    });
+    const builder = createBuilder(step, {
+      provider: 'claude',
+      providerOptions: {
+        claude: {
+          permissions: { importUserReadDeny: false },
+        },
+      },
+    });
+
+    const options = builder.buildAgentOptions(step, {
+      providerInfo: {
+        provider: 'claude',
+        model: 'sonnet',
+      },
+      teamLeaderPart: {
+        partAllowedTools: ['Read', 'Edit'],
+      },
+    });
+
+    const expectedClaude = {
+      permissions: { deny: ['Read(./.env)'], importUserReadDeny: false },
+    };
+    expect(options.providerOptions).toEqual({ claude: expectedClaude });
+    expect(options.resolvedProviderOptions).toEqual({ claude: expectedClaude });
+    expect(options.allowedTools).toEqual(['Read', 'Edit']);
   });
 });
