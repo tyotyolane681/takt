@@ -309,17 +309,7 @@ async function remeasureBirpcNoiseShards(results, runCommand) {
   return settled;
 }
 
-// Interim measure, root cause NOT confirmed: on the Windows CI runner `npm test` once exited 1
-// with no failure report line and no output after the shards started concurrently. Reading
-// run-npm-test.mjs / teed-command.mjs did not identify why (a hypothesis is that two
-// concurrent unit shards exhaust the runner, and teed-command's bounded pipe drain after `exit`
-// may drop trailing output; both unverified). Until that is understood, win32 runs the unit
-// shards one at a time. This may be masking the real cause; macOS / Linux stay concurrent.
-export function shouldRunUnitShardsSequentially(platform = process.platform) {
-  return platform === 'win32';
-}
-
-export async function executeNpmTestRuns(runs, runCommand, sequential = shouldRunUnitShardsSequentially()) {
+export async function executeNpmTestRuns(runs, runCommand) {
   const indexedRuns = runs.map((run, index) => ({ run, index }));
   const parallelRuns = indexedRuns.filter(({ run }) => PARALLEL_TEST_SCRIPTS.has(run.npmArgs[1]));
   const serialRuns = SERIAL_TEST_SCRIPTS.flatMap((script) =>
@@ -334,30 +324,18 @@ export async function executeNpmTestRuns(runs, runCommand, sequential = shouldRu
     ...run,
     result: await runCommand(run.run.npmArgs),
   });
-  const results = [];
-  if (sequential) {
-    for (const run of parallelRuns) {
-      results.push(await executeRun(run));
-    }
-  } else {
-    results.push(...await Promise.all(parallelRuns.map(executeRun)));
-  }
+  const results = await Promise.all(parallelRuns.map(executeRun));
   for (const run of serialRuns) {
     results.push(await executeRun(run));
   }
   return results.sort((left, right) => left.index - right.index);
 }
 
-export async function runNpmTest(
-  args,
-  runCommand = runNpmCommand,
-  unitShardCount,
-  sequential = shouldRunUnitShardsSequentially(),
-) {
+export async function runNpmTest(args, runCommand = runNpmCommand, unitShardCount) {
   if (!hasExplicitTargets(splitTestTargets(args))) {
     console.log(INTEGRATION_NOTICE);
   }
-  const results = await executeNpmTestRuns(selectNpmTestRuns(args, unitShardCount), runCommand, sequential);
+  const results = await executeNpmTestRuns(selectNpmTestRuns(args, unitShardCount), runCommand);
 
   const failed = (await remeasureBirpcNoiseShards(results, runCommand))
     .filter(({ result }) => result.code !== 0);

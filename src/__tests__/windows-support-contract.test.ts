@@ -7,6 +7,7 @@ const repoRoot = join(import.meta.dirname, '..', '..');
 
 interface WorkflowStep {
   run?: string;
+  'timeout-minutes'?: number;
   env?: Record<string, string>;
 }
 interface WorkflowJob {
@@ -23,6 +24,15 @@ function loadCiJobs(): Record<string, WorkflowJob> {
 function windowsJobs(): Array<[string, WorkflowJob]> {
   return Object.entries(loadCiJobs()).filter(([, job]) => job['runs-on'] === 'windows-latest');
 }
+
+function findFullWindowsJob(): WorkflowJob {
+  const [, job] = windowsJobs().find(([name]) => name === 'windows-build-test') ?? [];
+  expect(job).toBeDefined();
+  return job as WorkflowJob;
+}
+
+const UNIT_SHARD_COMMAND = (n: number): string =>
+  `npx vitest run --config vitest.config.unit.parallel.ts --shard=${n}/2 --maxWorkers=1`;
 
 function runCommands(job: WorkflowJob): string[] {
   return (job.steps ?? []).flatMap((step) => (step.run ? [step.run.trim()] : []));
@@ -53,26 +63,32 @@ describe('Windows support: line endings', () => {
 });
 
 describe('Windows support: CI', () => {
-  it('has a windows-latest job that builds and runs the full npm test gate', () => {
-    const matching = windowsJobs().filter(([, job]) => {
-      const commands = runCommands(job);
-      return commands.includes('npm run build') && commands.includes('npm test');
-    });
-    expect(matching.length).toBeGreaterThanOrEqual(1);
+  it('runs the unit suite on Windows as two direct vitest shards, bypassing the npm test wrapper', () => {
+    const commands = runCommands(findFullWindowsJob());
+    expect(commands).not.toContain('npm test');
+    const first = commands.indexOf(UNIT_SHARD_COMMAND(1));
+    const second = commands.indexOf(UNIT_SHARD_COMMAND(2));
+    expect(first).toBeGreaterThan(commands.indexOf('npm run build'));
+    expect(second).toBeGreaterThan(first);
+  });
+
+  it('bounds each Windows unit shard step with timeout-minutes: 20', () => {
+    const steps = findFullWindowsJob().steps ?? [];
+    for (const n of [1, 2]) {
+      const step = steps.find((s) => s.run?.trim() === UNIT_SHARD_COMMAND(n));
+      expect(step?.['timeout-minutes']).toBe(20);
+    }
   });
 
   it('installs with npm ci before building in the full Windows job', () => {
-    const [, job] = windowsJobs().find(([, j]) => runCommands(j).includes('npm test')) ?? [];
-    expect(job).toBeDefined();
-    const commands = runCommands(job as WorkflowJob);
+    const commands = runCommands(findFullWindowsJob());
     expect(commands.indexOf('npm ci')).toBeGreaterThanOrEqual(0);
     expect(commands.indexOf('npm ci')).toBeLessThan(commands.indexOf('npm run build'));
-    expect(commands.indexOf('npm run build')).toBeLessThan(commands.indexOf('npm test'));
+    expect(commands.indexOf('npm run build')).toBeLessThan(commands.indexOf(UNIT_SHARD_COMMAND(1)));
   });
 
   it('verifies bin/takt --version and --help after build on Windows', () => {
-    const [, job] = windowsJobs().find(([, j]) => runCommands(j).includes('npm test')) ?? [];
-    const commands = runCommands(job as WorkflowJob);
+    const commands = runCommands(findFullWindowsJob());
     const build = commands.indexOf('npm run build');
     const version = commands.findIndex((c) => /bin[\\/]takt\s+--version/.test(c));
     const help = commands.findIndex((c) => /bin[\\/]takt\s+--help/.test(c));
@@ -81,8 +97,7 @@ describe('Windows support: CI', () => {
   });
 
   it('runs a mock-provider workflow to completion on Windows', () => {
-    const [, job] = windowsJobs().find(([, j]) => runCommands(j).includes('npm test')) ?? [];
-    const steps = (job as WorkflowJob).steps ?? [];
+    const steps = findFullWindowsJob().steps ?? [];
     const mockStep = steps.find(
       (step) =>
         /test:e2e:mock|vitest.config.e2e.mock|e2e\/specs\//.test(step.run ?? '') &&
@@ -93,8 +108,7 @@ describe('Windows support: CI', () => {
   });
 
   it('bounds the Windows job runtime with timeout-minutes', () => {
-    const [, job] = windowsJobs().find(([, j]) => runCommands(j).includes('npm test')) ?? [];
-    expect((job as WorkflowJob)['timeout-minutes']).toBeGreaterThan(0);
+    expect(findFullWindowsJob()['timeout-minutes']).toBeGreaterThan(0);
   });
 
   it('keeps the existing windows-private-artifacts focused job', () => {
