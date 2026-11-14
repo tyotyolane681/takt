@@ -463,6 +463,7 @@ export const lightNamedIntegrationTestFiles = Object.freeze([
   'src/__tests__/taskInstructionActions.test.ts',
   'src/__tests__/tool-activity-terminal.integration.test.ts',
   'src/__tests__/verify-across-providers.integration.test.ts',
+  'src/__tests__/windows-support-contract.test.ts',
 ]);
 
 export const lightIntegrationTestFiles = Object.freeze([
