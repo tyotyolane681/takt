@@ -575,6 +575,7 @@ function assertNdjsonRecordShape(
           record.method !== 'structured_output'
           && record.method !== 'phase3_tag'
           && record.method !== 'ai_judge'
+          && record.method !== 'jev'
         )
         || (
           record.status !== 'done'
