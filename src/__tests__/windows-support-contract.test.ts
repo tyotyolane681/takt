@@ -1,18 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 
 const repoRoot = join(import.meta.dirname, '..', '..');
 
 interface WorkflowStep {
-  name?: string;
-  uses?: string;
   run?: string;
-  if?: string;
-  'timeout-minutes'?: number;
   env?: Record<string, string>;
 }
 interface WorkflowJob {
@@ -108,146 +102,6 @@ describe('Windows support: CI', () => {
     const job = jobs['windows-private-artifacts'];
     expect(job?.['runs-on']).toBe('windows-latest');
     expect(runCommands(job as WorkflowJob).some((c) => c.includes('windows-executable-shadowing.test.ts'))).toBe(true);
-  });
-});
-
-describe('Windows support: temporary unit shard diagnostics', () => {
-  function windowsFullJob(): WorkflowJob {
-    const [, job] = windowsJobs().find(([, j]) => runCommands(j).includes('npm test')) ?? [];
-    return job as WorkflowJob;
-  }
-
-  function shardSteps(job: WorkflowJob): WorkflowStep[] {
-    return (job.steps ?? []).filter((step) => /vitest\s+run\b/.test(step.run ?? '') && /--shard=/.test(step.run ?? ''));
-  }
-
-  it('runs unit shards 1/2 then 2/2 sequentially as separate steps with the parallel unit config and one worker', () => {
-    const job = windowsFullJob();
-    const steps = job.steps ?? [];
-    const shards = shardSteps(job);
-    expect(shards).toHaveLength(2);
-    const [first, second] = shards as [WorkflowStep, WorkflowStep];
-    expect(first.run).toContain('--shard=1/2');
-    expect(second.run).toContain('--shard=2/2');
-    for (const step of shards) {
-      expect(step.run).toContain('vitest.config.unit.parallel.ts');
-      expect(step.run).toContain('--maxWorkers=1');
-    }
-    expect(steps.indexOf(first)).toBeLessThan(steps.indexOf(second));
-  });
-
-  it('writes each shard result as JSON to its own path while keeping the default reporter', () => {
-    const outputs = shardSteps(windowsFullJob()).map((step) => {
-      expect(step.run).toContain('--reporter=default');
-      expect(step.run).toContain('--reporter=json');
-      const match = /--outputFile\.json=(\S+)/.exec(step.run ?? '');
-      expect(match).not.toBeNull();
-      return match?.[1];
-    });
-    expect(outputs).toHaveLength(2);
-    expect(new Set(outputs).size).toBe(2);
-  });
-
-  it('bounds every shard step with its own timeout-minutes below the job timeout', () => {
-    const job = windowsFullJob();
-    expect(shardSteps(job)).toHaveLength(2);
-    for (const step of shardSteps(job)) {
-      expect(step['timeout-minutes']).toBeGreaterThan(0);
-      expect(step['timeout-minutes']).toBeLessThan(job['timeout-minutes'] as number);
-    }
-  });
-
-  it('does not extend test timeouts in the diagnostic shard steps', () => {
-    expect(shardSteps(windowsFullJob())).toHaveLength(2);
-    for (const step of shardSteps(windowsFullJob())) {
-      expect(step.run).not.toMatch(/--testTimeout/);
-    }
-  });
-
-  it('summarizes with a node script in an if: always() step placed after both shards', () => {
-    const job = windowsFullJob();
-    const steps = job.steps ?? [];
-    const shards = shardSteps(job);
-    const lastShard = Math.max(...shards.map((step) => steps.indexOf(step)));
-    const summary = steps.find((step) => /node\s+scripts[\\/][\w.-]+\.mjs/.test(step.run ?? ''));
-    expect(summary).toBeDefined();
-    expect(summary?.if).toMatch(/always\(\)/);
-    expect(steps.indexOf(summary as WorkflowStep)).toBeGreaterThan(lastShard);
-  });
-
-  it('keeps the npm test gate and the mock-provider workflow step in the Windows job', () => {
-    const commands = runCommands(windowsFullJob());
-    expect(commands).toContain('npm test');
-    expect(commands.some((c) => c.includes('vitest.config.e2e.mock.ts'))).toBe(true);
-  });
-
-  it('does not add shard diagnostics to non-Windows jobs', () => {
-    const jobs = Object.entries(loadCiJobs()).filter(([, job]) => job['runs-on'] !== 'windows-latest');
-    for (const [, job] of jobs) {
-      for (const command of runCommands(job)) {
-        expect(command).not.toMatch(/--outputFile\.json/);
-      }
-    }
-  });
-});
-
-describe('Windows support: shard summary script', () => {
-  const script = join(repoRoot, 'scripts', 'summarize-vitest-shards.mjs');
-
-  function summarize(shards: string[], env: Record<string, string>): string {
-    return execFileSync(process.execPath, [script, ...shards], {
-      encoding: 'utf8',
-      env: { ...process.env, VITEST_SHARD_1_EXIT: undefined, VITEST_SHARD_2_EXIT: undefined, ...env },
-    });
-  }
-
-  function withTempDir(run: (dir: string) => void): void {
-    const dir = mkdtempSync(join(tmpdir(), 'takt-shard-summary-'));
-    try {
-      run(dir);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
-
-  it('reports exit code and counts for a passing shard without listing failures', () => {
-    withTempDir((dir) => {
-      const json = join(dir, 'ok.json');
-      writeFileSync(json, JSON.stringify({
-        numTotalTests: 2, numPassedTests: 2, numFailedTests: 0, numPendingTests: 0,
-        testResults: [{ name: '/a.test.ts', status: 'passed', message: '', assertionResults: [{ fullName: 'a works', status: 'passed' }] }],
-      }));
-      const out = summarize([`1=${json}`], { VITEST_SHARD_1_EXIT: '0' });
-      expect(out).toContain('shard 1: exit code 0');
-      expect(out).toContain('failed: 0');
-      expect(out).not.toContain('FAILED');
-    });
-  });
-
-  it('lists failed files and tests for a failing shard', () => {
-    withTempDir((dir) => {
-      const json = join(dir, 'ng.json');
-      writeFileSync(json, JSON.stringify({
-        numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, numPendingTests: 0,
-        testResults: [{
-          name: '/b.test.ts', status: 'failed', message: 'boom',
-          assertionResults: [{ fullName: 'b works', status: 'passed' }, { fullName: 'b breaks', status: 'failed' }],
-        }],
-      }));
-      const out = summarize([`2=${json}`], { VITEST_SHARD_2_EXIT: '1' });
-      expect(out).toContain('shard 2: exit code 1');
-      expect(out).toContain('FAILED FILE: /b.test.ts');
-      expect(out).toContain('FAILED TEST: b breaks');
-      expect(out).not.toContain('FAILED TEST: b works');
-    });
-  });
-
-  it('states that vitest ended without writing results when the JSON is missing', () => {
-    withTempDir((dir) => {
-      const out = summarize([`1=${join(dir, 'missing.json')}`], {});
-      expect(out).toContain('JSON なし = vitest が結果を書けずに終了');
-      expect(out).toContain('unknown');
-    });
   });
 });
 

@@ -1,5 +1,5 @@
 vi.mock('../infra/managed-providers/loader.js', () => import('./helpers/managed-sdk.js'));
-import { basename, dirname, normalize } from 'node:path';
+import { basename, dirname, join, normalize } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CodexCallOptions } from '../infra/codex/types.js';
 import { MAX_AGENT_FAILURE_MESSAGE_BYTES } from '../shared/types/agent-failure.js';
@@ -255,7 +255,7 @@ describe('CodexClient failure handling', () => {
       `[TRUNCATED: `,
     );
     expect(result.error).toContain(
-      `full text: .takt/runs/run-1/failures/${basename(writtenPath)}]`,
+      `full text: ${join('.takt', 'runs', 'run-1', 'failures', basename(writtenPath))}]`,
     );
     const marker = result.error?.match(/\[TRUNCATED: (\d+) bytes, full text:/);
     expect(marker).not.toBeNull();
