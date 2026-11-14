@@ -27,9 +27,12 @@ export function selectNpmTestRuns(
 export function executeNpmTestRuns(
   runs: readonly NpmTestRun[],
   runCommand: NpmTestCommand,
+  sequential?: boolean,
 ): Promise<ExecutedNpmTestRun[]>;
+export function shouldRunUnitShardsSequentially(platform?: NodeJS.Platform): boolean;
 export function runNpmTest(
   args: readonly string[],
   runCommand?: NpmTestCommand,
   unitShardCount?: number,
+  sequential?: boolean,
 ): Promise<number>;
