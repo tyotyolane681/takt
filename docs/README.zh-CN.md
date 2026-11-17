@@ -26,13 +26,24 @@
 >
 > **与上游的区别：** 新增 opt-in 的 `jev` 设置。启用后，Phase 3 的状态判定将由 [Jev](https://docs.typesafe.ai)（TypeSafe）完成，而不是每次判定都启动 provider 会话。默认禁用，因此不启用时与上游行为一致。详见 [使用 Jev 进行状态判定](./configuration.zh-CN.md#使用-jev-进行状态判定)。
 >
-> **安装此 fork**（npm 上的 `takt` 包是上游版本，不是此 fork；需要 Node.js 22.22 或更高版本）：
+> **安装此 fork**（npm 上的 `takt` 包是上游版本，不是此 fork）。需要 Node.js 22.22 或更高版本，以及 Git 2.38 或更高版本。
 >
 > ```bash
-> git clone https://github.com/tyotyolane681/takt.git && cd takt
+> # 1. 获取源码
+> git clone https://github.com/tyotyolane681/takt.git
+> cd takt
+>
+> # 2. 构建并全局安装
 > npm ci && npm run build && npm install -g .
+>
+> # 3. 确认
+> takt --version
 > ```
 >
+> 如果已从 npm 安装了上游 `takt`，请先执行 `npm uninstall -g takt` 将其移除，因为两者都提供 `takt` 命令，会发生冲突。
+>
+> 之后更新时：`git pull && npm ci && npm run build && npm install -g .`
+
 > 此 fork 特有的问题请在 [这里](https://github.com/tyotyolane681/takt/issues) 报告，而不是上游。以下为上游文档。
 
 <p align="center">
@@ -81,7 +92,7 @@ TAKT 将这些环节组织为由角色、阶段、判断和反馈循环组成的
 请在至少有一个 commit 的 Git 仓库中运行：
 
 ```bash
-npm install -g takt
+# 请先安装此 fork（参见本页顶部的“安装此 fork”）
 
 # 与 AI 对话描述任务，使用 /go，然后选择“加入任务队列”
 takt
@@ -154,7 +165,7 @@ TAKT 需要 Node.js `>=22.22.0` 和 Git `>=2.38`（目标完成判定使用 `git
 ### 安装
 
 ```bash
-npm install -g takt
+# 请先安装此 fork（参见本页顶部的“安装此 fork”）
 ```
 
 使用 Nix flakes：
