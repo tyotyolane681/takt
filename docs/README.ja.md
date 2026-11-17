@@ -28,12 +28,23 @@
 >
 > 試験的な実行（1回のワークフロー実行で判定 8回）では、判定のための provider 呼び出しが 8回から 1回に、判定で消費するトークンが約 83% 減り、判定にかかる時間の合計が 39秒から 4秒になりました。効果はワークフローやレポートの内容によって変わります。
 >
-> **この fork のインストール**（npm の `takt` パッケージは元の takt のリリースで、この fork ではありません。Node.js 22.22 以上が必要です）:
+> **この fork のインストール**（npm の `takt` パッケージは元の takt のリリースで、この fork ではありません）。Node.js 22.22 以上と Git 2.38 以上が必要です。
 >
 > ```bash
-> git clone https://github.com/tyotyolane681/takt.git && cd takt
+> # 1. ソースを取得
+> git clone https://github.com/tyotyolane681/takt.git
+> cd takt
+>
+> # 2. ビルドしてグローバルにインストール
 > npm ci && npm run build && npm install -g .
+>
+> # 3. 確認
+> takt --version
 > ```
+>
+> 元の takt を npm から先にインストールしている場合は、`npm uninstall -g takt` で削除してください。両方とも `takt` コマンドを提供するため衝突します。
+>
+> 後で更新する場合: `git pull && npm ci && npm run build && npm install -g .`
 >
 > この fork に固有の問題は、元の takt ではなく [こちら](https://github.com/tyotyolane681/takt/issues) に報告してください。以下は元の takt のドキュメントです。
 
@@ -83,7 +94,7 @@ TAKT はこれらを役割、工程、判定、フィードバックループか
 少なくとも1回 commit 済みの Git リポジトリで実行します。
 
 ```bash
-npm install -g takt
+# まず この fork をインストールします（このページ上部の「この fork のインストール」を参照）
 
 # 既定の provider(claude-sdk)の SDK をインストールします
 takt install claude-sdk
@@ -183,7 +194,7 @@ TAKT の CI は `windows-latest` で build と unit テストを実行し、mock
 ### インストール
 
 ```bash
-npm install -g takt
+# まず この fork をインストールします（このページ上部の「この fork のインストール」を参照）
 takt install claude-sdk   # codex、opencode、pi、deepseek-harness も同様
 ```
 
