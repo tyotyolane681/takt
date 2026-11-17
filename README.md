@@ -28,12 +28,23 @@
 >
 > In our trial runs (8 judgments per workflow run), provider calls for judgment went from 8 to 1, tokens spent on judgment dropped by about 83%, and total judgment time went from 39 s to 4 s. Results depend on your workflows and reports.
 >
-> **Install this fork** (the `takt` package on npm is the upstream release, not this fork; Node.js 22.22 or later is required):
+> **Install this fork** (the `takt` package on npm is the upstream release, not this fork). Requires Node.js 22.22 or later and Git 2.38 or later.
 >
 > ```bash
-> git clone https://github.com/tyotyolane681/takt.git && cd takt
+> # 1. Get the source
+> git clone https://github.com/tyotyolane681/takt.git
+> cd takt
+>
+> # 2. Build and install globally
 > npm ci && npm run build && npm install -g .
+>
+> # 3. Verify
+> takt --version
 > ```
+>
+> If you already installed upstream `takt` from npm, remove it first with `npm uninstall -g takt`, because both provide the `takt` command.
+>
+> To update later: `git pull && npm ci && npm run build && npm install -g .`
 >
 > Report issues specific to this fork [here](https://github.com/tyotyolane681/takt/issues), not to upstream. The rest of this README is the upstream documentation.
 
@@ -83,7 +94,7 @@ TAKT runs all of this as a reusable agent process built from roles, phases, judg
 From a Git repository with at least one commit:
 
 ```bash
-npm install -g takt
+# Install this fork first (see "Install this fork" at the top of this README)
 
 # Install the SDK for the default provider (claude-sdk)
 takt install claude-sdk
@@ -183,7 +194,7 @@ TAKT's CI builds and runs the unit gate on `windows-latest`, and runs one mock-p
 ### Install
 
 ```bash
-npm install -g takt
+# Install this fork first (see "Install this fork" at the top of this README)
 takt install claude-sdk   # or codex, opencode, pi, deepseek-harness
 ```
 
